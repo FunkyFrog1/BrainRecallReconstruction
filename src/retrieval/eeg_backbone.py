@@ -48,54 +48,31 @@ class EEGProject(nn.Module):
 
 from models.Conv import OptimizedConvBlock
 class Ours(nn.Module):
-    def __init__(self, z_dim, c_num, timesteps, drop_proj=0.3):
-        super(Ours, self).__init__()
+    def __init__(self, z_dim, c_num, timesteps, drop_proj=0.2):
+        super().__init__()
         self.z_dim = z_dim
         self.c_num = c_num
         self.timesteps = timesteps
 
         self.input_dim = self.c_num * (self.timesteps[1] - self.timesteps[0])
-
         proj_dim = z_dim
 
-        d = self.timesteps[1] - self.timesteps[0]
-        self.conv = OptimizedConvBlock(d=d, c_num=c_num)
-
-        self.model = nn.Sequential(
-                                   nn.Linear(self.input_dim, proj_dim),
+        self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
                                    ResidualAdd(nn.Sequential(
                                        nn.GELU(),
                                        nn.Linear(proj_dim, proj_dim),
                                        nn.Dropout(drop_proj),
                                    )),
-                                   nn.LayerNorm(proj_dim), )
-
+                                   nn.LayerNorm(proj_dim))
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.softplus = nn.Softplus()
 
     def forward(self, x):
-        x_res = self.conv(x.transpose(-1, -2))
-        x = x.view(x.shape[0], self.input_dim)
+        B, n, c, d = x.shape
+        x = x.view(x.shape[0], n, self.input_dim)
         x = self.model(x)
+        x = x.mean(dim=1)
         return x
-
-    def random_scale_augmentation(self, x):
-        """
-        对输入张量进行整体随机缩放
-
-        Args:
-            x: 输入张量 [batch_size, input_dim]
-
-        Returns:
-            缩放后的张量
-        """
-        # 为每个样本生成独立的缩放因子
-        scale_min, scale_max = 0.8, 1.2
-        scale_factors = torch.empty(x.size(0), 1, device=x.device).uniform_(scale_min, scale_max)
-
-        # 应用缩放
-        x_scaled = x * scale_factors
-
-        return x_scaled
 
 
 from models.MoE import MoELayer

@@ -60,7 +60,7 @@ class PLModel(pl.LightningModule):
     def forward(self, batch, sample_posterior=False):
 
         idx = batch['idx'].cpu().detach().numpy()
-        eeg = batch['eeg'].mean(dim=1)
+        eeg = batch['eeg']
         img = batch['img']
 
         img_z = batch['img_features']
@@ -299,7 +299,7 @@ from itertools import product
 def run_experiment(args):
     eeg_backbone, vision_backbone, seed, sub, start_time, end_time = args
     try:
-        yaml = "../configs/baseline_ubp.yaml"
+        yaml = "../../configs/baseline_ubp.yaml"
         config = OmegaConf.load(yaml)
         config['eeg_backbone'] = eeg_backbone
         config['vision_backbone'] = vision_backbone[0]
@@ -315,16 +315,16 @@ def run_experiment(args):
         return (eeg_backbone, vision_backbone, seed, sub, "ERROR", str(e))
 
 
-def run_experiment_with_retry(params, max_retries=3):
+def run_experiment_with_retry(params, max_retries=30):
     """带重试的实验运行函数"""
     for attempt in range(max_retries):
         try:
             result = run_experiment(params)
-            print(result[-1])
             status = result[4]
             if status == "SUCCESS":
                 return result
             else:
+                print(result[-1])
                 print(f"⚠️ 任务失败，{300}秒后重试 (尝试 {attempt + 1}/{max_retries})")
         except Exception as e:
             print(f"⚠️ 进程异常，{300}秒后重试 (尝试 {attempt + 1}/{max_retries}): {e}")
@@ -337,12 +337,12 @@ def run_experiment_with_retry(params, max_retries=3):
 
 
 if __name__ == "__main__":
-    eeg_backbones = ['EEGProject']
+    eeg_backbones = ['Ours']
     vision_backbones = [('ViT-B-32', 512)]
-    seeds = range(1)
-    subs = [0]
+    seeds = range(10)
+    subs = [0, 1]
     start_time = [250]
-    end_time = [450]
+    end_time = [600]
 
     param_combinations = list(product(eeg_backbones, vision_backbones, seeds, subs, start_time, end_time))
 

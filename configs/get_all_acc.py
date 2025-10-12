@@ -6,7 +6,7 @@ import csv
 results = []
 headers = ['Subject', 'Seed', 'Top-1 Acc (%)', 'Top-5 Acc (%)', 'mAP (%)']
 
-for sub in range(10):
+for sub in range(2):
     for s in range(10):
         try:
             with open(f'./sub-{sub + 1:02d}/seed{s}/test_results.json') as f:

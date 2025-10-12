@@ -1,4 +1,4 @@
-timesteps: [0,250]
+timesteps: [250,600]
 blur_kernel_size: 51
 system_g: 3
 c: 10
