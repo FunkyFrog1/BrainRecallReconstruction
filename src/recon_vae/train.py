@@ -20,7 +20,7 @@ from data_eeg import load_eeg_data
 from utils import update_config, instantiate_from_config, get_device, ClipLoss, mixco_data
 import time
 device = get_device('auto')
-
+from VAE import VAEProcessor
 
 def load_model(config, train_loader, test_loader):
     model = {}
@@ -56,6 +56,7 @@ class PLModel(pl.LightningModule):
         self.match_similarities = []
 
         # self.load_state_dict(torch.load())
+        self.vae = VAEProcessor()
 
     def forward(self, batch, sample_posterior=False):
 
@@ -76,7 +77,8 @@ class PLModel(pl.LightningModule):
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
 
-        loss, logits_per_image = self.criterion(eeg_z, img_z, logit_scale)
+        _, logits_per_image = self.criterion(eeg_z, img_z, logit_scale)
+        loss = F.mse_loss(eeg_z, img_z)
 
         if self.config['data']['mixco']:
             loss_mixed, _ = self.criterion(eeg_z_mixed, img_z_mixed, logit_scale)
@@ -109,11 +111,11 @@ class PLModel(pl.LightningModule):
         else:
             loss = total_loss
 
-        return eeg_z, img_z, loss
+        return eeg_z, img_z, img, loss
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
-        eeg_z, img_z, loss = self(batch, sample_posterior=True)
+        eeg_z, img_z, _, loss = self(batch, sample_posterior=True)
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
@@ -154,9 +156,14 @@ class PLModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
 
-        eeg_z, img_z, loss = self(batch)
+        eeg_z, img_z, img, loss = self(batch)
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
+
+        img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4))
+        # img = self.vae.decode_from_latent(img_z.reshape(img_z.shape[0], 16, 4, 4))
+        print(F.mse_loss(img_recon, img))
+
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
 
         similarity = (eeg_z @ img_z.T)
@@ -184,7 +191,7 @@ class PLModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
-        eeg_z, img_z, loss = self(batch)
+        eeg_z, img_z, _, loss = self(batch)
         self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
@@ -307,7 +314,7 @@ def run_experiment(args):
         config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
         config['seed'] = seed
         config['timesteps'] = [start_time, end_time]
-        config['info'] = f'-ubp-[{start_time},{end_time}]-dropout0.2'
+        config['info'] = f'-ubp-[{start_time},{end_time}]-dropout0.2-mixup'
 
         result = main(config, yaml)
         return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
@@ -338,9 +345,9 @@ def run_experiment_with_retry(params, max_retries=30):
 
 if __name__ == "__main__":
     eeg_backbones = ['Ours']
-    vision_backbones = [('ViT-B-32', 512)]
-    seeds = range(10)
-    subs = [0, 1]
+    vision_backbones = [('vae', 256)]
+    seeds = range(1)
+    subs = range(1)
     start_time = [250]
     end_time = [600]
 

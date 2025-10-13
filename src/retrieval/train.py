@@ -307,7 +307,7 @@ def run_experiment(args):
         config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
         config['seed'] = seed
         config['timesteps'] = [start_time, end_time]
-        config['info'] = f'-ubp-[{start_time},{end_time}]-dropout0.2'
+        config['info'] = f'-ubp-[{start_time},{end_time}]-dropout0.2-mixup'
 
         result = main(config, yaml)
         return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
@@ -315,7 +315,7 @@ def run_experiment(args):
         return (eeg_backbone, vision_backbone, seed, sub, "ERROR", str(e))
 
 
-def run_experiment_with_retry(params, max_retries=3):
+def run_experiment_with_retry(params, max_retries=30):
     """带重试的实验运行函数"""
     for attempt in range(max_retries):
         try:
