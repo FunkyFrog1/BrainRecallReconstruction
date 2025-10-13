@@ -100,26 +100,6 @@ class ClipLoss(nn.Module):
         return total_loss, logits_per_image
 
 
-class ClipLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, image_features, text_features, logit_scale):
-        device = image_features.device
-        logits_per_image = logit_scale * image_features @ text_features.T
-        logits_per_text = logit_scale * text_features @ image_features.T
-
-        num_logits = logits_per_image.shape[0]
-        labels = torch.arange(num_logits, device=device, dtype=torch.long)
-
-        image_loss = F.cross_entropy(logits_per_image, labels)
-        text_loss = F.cross_entropy(logits_per_text, labels)
-
-        total_loss = (image_loss + text_loss) / 2
-
-        return total_loss, logits_per_image
-
-
 class SNClipLoss(nn.Module):
     def __init__(self, epsilon=0.1):
         super().__init__()
@@ -219,3 +199,4 @@ def mixcut_data_tri(eeg, eeg2, img_z, alpha=1.0, time_ratio=0.5):
 
     mixed_img_z = lam * img_z + (1 - lam) * img_z[indices]
     return mixed_eeg, mixed_eeg2, mixed_img_z
+
