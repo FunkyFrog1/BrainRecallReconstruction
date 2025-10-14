@@ -209,4 +209,9 @@ __marimo__/
 
 # Datasets
 data/*
+!data/placeholder.txt
+
+# src
+src/retrieval/exp
+src/recon_vae/exp
 
