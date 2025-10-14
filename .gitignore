@@ -215,3 +215,8 @@ data/*
 src/retrieval/exp
 src/recon_vae/exp
 
+# visionbackbone
+vision_backbone
+# stage3
+Stage3
+
