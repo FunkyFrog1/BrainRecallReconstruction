@@ -45,8 +45,6 @@ class EEGProject(nn.Module):
         x = self.model(x)
         return x
 
-
-from models.Conv import OptimizedConvBlock
 class Ours(nn.Module):
     def __init__(self, z_dim, c_num, timesteps, drop_proj=0.2):
         super().__init__()
@@ -63,18 +61,20 @@ class Ours(nn.Module):
                                        nn.Linear(proj_dim, proj_dim),
                                        nn.Dropout(drop_proj),
                                    )),
-                                   nn.LayerNorm(proj_dim))
+                                   )
+        self.bn = nn.BatchNorm1d(proj_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
 
     def forward(self, x):
         B, n, c, d = x.shape
         x = x.view(x.shape[0], n, self.input_dim)
-        # if not self.training:
-        #     x = self.random_sample_mix(x)
         x = self.model(x)
-        if not self.training:
-            x = self.random_sample_mix(x)
+
+        x = x.view(B * n, x.shape[-1])
+        x = self.bn(x)
+        x = x.view(B, n, x.shape[-1])
+
         x = x.mean(dim=1)
         return x
 

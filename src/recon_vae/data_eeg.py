@@ -131,7 +131,6 @@ class EEGDataset(Dataset):
 
         self.resize_for_vae = transforms.Compose([
             transforms.Lambda(lambda x: x.convert("RGB")),  # 确保图像为RGB模式
-            transforms.Resize((32, 32)),
             transforms.ToTensor()
         ])
 
@@ -144,7 +143,6 @@ class EEGDataset(Dataset):
 
         self.trial_subject = self.loaded_data[0]['eeg'].shape[0]
         self.trial_all_subjects = self.trial_subject * len(self.subjects)
-
 
         data_dir = os.path.join(self.data_dir, 'Image_feature',
                                 f"{config['data']['blur_type']['target'].rsplit('.', 1)[-1]}")
@@ -237,8 +235,6 @@ class EEGDataset(Dataset):
     def load_data(self, data_path):
         loaded_data = torch.load(data_path, weights_only=False)
         loaded_data['eeg'] = torch.from_numpy(loaded_data['eeg'])
-        print(loaded_data['img'].shape)
-
 
         if self.selected_ch:
             selected_idx = [self.channels.index(ch) for ch in self.selected_ch]
