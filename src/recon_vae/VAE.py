@@ -1,19 +1,22 @@
+import PIL.Image
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.image_processor import VaeImageProcessor
 import torch.nn.functional as F
 import torch
 
+
 class VAEProcessor:
-    def __init__(self, vae_path='../../vision_backbone/vae', device='cuda'):
+    def __init__(self, vae_path='../../vision_backbone/vae', device='cuda', dtype=torch.bfloat16):
         """
         初始化VAE处理器
 
         参数:
             vae_path: VAE模型路径
             device: 运行设备
+            dtype: 数据类型
         """
         self.device = device
-        self.dtype = torch.bfloat16
+        self.dtype = dtype
 
         # 加载VAE模型
         self.vae = AutoencoderKL.from_pretrained(
@@ -33,14 +36,13 @@ class VAEProcessor:
             param.requires_grad = False
 
     def encode_to_latent_dist(self, x):
+        # 预处理图像
+        x = self.image_processor.preprocess(x)
+
         with torch.no_grad():
-            # 确保输入在正确范围内并转换为正确数据类型
+            # 确保输入数据类型正确
             if x.dtype != self.dtype:
                 x = x.to(self.dtype)
-
-            # 如果图像值范围是[0,1]，需要缩放到[-1,1]
-            if x.min() >= 0 and x.max() <= 1:
-                x = x * 2 - 1
 
             # 使用VAE编码器
             posterior = self.vae.encode(x).latent_dist
@@ -49,46 +51,115 @@ class VAEProcessor:
             return posterior, latent_sample
 
     def decode_from_latent(self, latent, return_pil=False):
-        with torch.no_grad():
-            # 确保潜变量数据类型正确
-            if latent.dtype != self.dtype:
-                latent = latent.to(self.dtype)
+        # 确保潜变量数据类型正确
+        if latent.dtype != self.dtype:
+            latent = latent.to(self.dtype)
 
-            # 使用VAE解码器
+        # 使用VAE解码器
+        with torch.no_grad():
             decoded = self.vae.decode(latent).sample
 
-            # 将输出从[-1,1]缩放到[0,1]
-            decoded = (decoded + 1) / 2
+        # 后处理
+        if return_pil:
+            # 返回PIL图像
+            decoded = self.image_processor.postprocess(
+                decoded, output_type="pil", do_denormalize=[True]
+            )
+        else:
+            # 返回张量
+            decoded = self.image_processor.postprocess(
+                decoded,
+                output_type="pt",
+                do_denormalize=[True] * decoded.shape[0])  # 关键修复
+        return decoded
 
-            # 如果需要返回PIL图像
-            if return_pil:
-                decoded = self.image_processor.postprocess(
-                    decoded, output_type="pil", do_denormalize=[True]
-                )
-
-            return decoded
+    def encode_to_latent(self, x):
+        """
+        简化的编码接口，只返回潜在变量
+        """
+        _, latent_sample = self.encode_to_latent_dist(x)
+        return latent_sample
 
 
 # 使用示例
+import matplotlib.pyplot as plt
+import numpy as np
+from torchvision import transforms
+
+
 def test_vae():
+    """
+    测试VAE处理器功能
+    """
     # 初始化处理器
     vae_processor = VAEProcessor()
 
-    # 假设你有一张已经resize好的图片 x
-    # x 的形状应该是 [B, C, H, W]，值范围最好是[0,1]或[-1,1]
-    x = torch.rand(1, 3, 32, 32).cuda()
+    try:
+        # 加载测试图像
+        x = PIL.Image.open('./test.jpg').convert('RGB').resize((32, 32))
 
-    # 1. 编码为latent distribution
-    posterior, latent_sample = vae_processor.encode_to_latent_dist(x)
-    print(latent_sample.shape)
+        # 预处理变换
+        process_transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+        x = process_transform(x).unsqueeze(0).to(vae_processor.device)
 
-    # 3. 从潜变量解码回图像
-    reconstructed_image = vae_processor.decode_from_latent(latent_sample)
-    print(reconstructed_image.shape)
-    print((x - reconstructed_image).mean())
+        print(f"原始图像形状: {x.shape}")
 
-    # 4. 也可以从分布的均值解码（更稳定的重建）
-    # reconstructed_from_mean = vae_processor.decode_from_latent(mean)
+        # 1. 编码为潜在分布
+        posterior, latent_sample = vae_processor.encode_to_latent_dist(x)
+        print(f"潜在变量形状: {latent_sample.shape}")
+
+        # 2. 从潜变量解码回图像
+        reconstructed_image = vae_processor.decode_from_latent(latent_sample)
+        print(f"重建图像形状: {reconstructed_image.shape}")
+
+        # 3. 计算重建质量指标
+        mse_loss = F.mse_loss(reconstructed_image, x).item()
+        psnr = 20 * np.log10(1.0 / np.sqrt(mse_loss))
+
+        print(f"重建MSE损失: {mse_loss:.6f}")
+        print(f"PSNR: {psnr:.2f} dB")
+
+        # 4. 可视化结果
+        visualize_comparison(x, reconstructed_image, mse_loss, psnr)
+
+    except FileNotFoundError:
+        print("测试图像未找到，使用随机张量进行测试")
+
+def visualize_comparison(original, reconstructed, mse_loss, psnr):
+    """
+    可视化原始图像和重建图像的对比
+    """
+    # 转换为numpy数组用于显示
+    original_np = original.detach().float().cpu().squeeze(0).permute(1, 2, 0).numpy()
+    recon_np = reconstructed.detach().float().cpu().squeeze(0).permute(1, 2, 0).numpy()
+
+    # 裁剪到[0,1]范围
+    original_np = np.clip(original_np, 0, 1)
+    recon_np = np.clip(recon_np, 0, 1)
+
+    # 创建可视化
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # 原始图像
+    axes[0].imshow(original_np)
+    axes[0].set_title('原始图像')
+    axes[0].axis('off')
+
+    # 重建图像
+    axes[1].imshow(recon_np)
+    axes[1].set_title(f'重建图像\nPSNR: {psnr:.2f}dB')
+    axes[1].axis('off')
+
+    # 差异图像
+    diff = np.abs(original_np - recon_np)
+    axes[2].imshow(diff, cmap='hot')
+    axes[2].set_title(f'差异图像\nMSE: {mse_loss:.6f}')
+    axes[2].axis('off')
+
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == '__main__':

@@ -1,8 +1,9 @@
 import gc
+import os
 
+import matplotlib.pyplot as plt
 import numpy as np
 import open_clip
-import os
 import torch
 from PIL import Image
 from omegaconf import OmegaConf
@@ -10,7 +11,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm import tqdm
-from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 
 from utils import instantiate_from_config, get_device
 
@@ -173,11 +173,17 @@ class EEGDataset(Dataset):
         else:
             self.blur_transform = instantiate_from_config(config['data']['blur_type'])
 
-        process_term = [
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(
-            0.26862954, 0.26130258, 0.27577711))
-        ]
+        if self.model_type == 'vae':
+            process_term = [
+                transforms.ToTensor(),
+            ]
+        else:
+            process_term = [
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(
+                    0.26862954, 0.26130258, 0.27577711))
+            ]
+
         self.process_transform = transforms.Compose(process_term)
 
         self.match_label = np.ones(self.trial_all_subjects, dtype=int)
@@ -192,7 +198,8 @@ class EEGDataset(Dataset):
             if self.model_type == 'vae':
                 from diffusers.models.autoencoders import AutoencoderKL
                 from diffusers.image_processor import VaeImageProcessor
-                self.vlmodel = AutoencoderKL.from_pretrained('../../vision_backbone/vae', torch_dtype=torch.bfloat16).to(device).eval()
+                self.vlmodel = AutoencoderKL.from_pretrained('../../vision_backbone/vae',
+                                                             torch_dtype=torch.bfloat16).to(device).eval()
                 vae_scale_factor = 2 ** (len(self.vlmodel.config.block_out_channels) - 1)
                 self.image_processor = VaeImageProcessor(
                     vae_scale_factor=vae_scale_factor, vae_latent_channels=self.vlmodel.config.latent_channels
@@ -243,7 +250,7 @@ class EEGDataset(Dataset):
 
         if self.avg:
             avg_data = {}
-            avg_data['eeg'] = loaded_data['eeg']#.mean(axis=1)
+            avg_data['eeg'] = loaded_data['eeg']  # .mean(axis=1)
             avg_data['label'] = loaded_data['label'][:, 0]
             avg_data['img'] = loaded_data['img'][:, 0]
             avg_data['text'] = loaded_data['text'][:, 0]
@@ -280,19 +287,24 @@ class EEGDataset(Dataset):
 
             if self.model_type == 'vae':
                 ele = [self.image_processor.preprocess(
-                    blur_transform(
-                        Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224))).resize(
-                        (32, 32)))
+                    self.process_transform(
+                        blur_transform(
+                            Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224))
+                        )
+                        .resize((32, 32)))
+                )
                     for
                     img in batch_images
                 ]
                 processed_images = torch.concat(ele).to(device)
                 processed_images = processed_images.to(device=device, dtype=torch.bfloat16)
                 latent_dist = self.vlmodel.encode(processed_images).latent_dist
+
                 batch_image_features = latent_dist.sample().flatten(1, -1)
             else:
                 ele = [self.process_transform(
-                    blur_transform(Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224)))) for
+                    blur_transform(
+                        Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224)))) for
                     img in batch_images]
                 image_inputs = torch.stack(ele).to(device)
                 batch_image_features = self.vlmodel.encode_image(image_inputs)

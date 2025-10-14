@@ -1,4 +1,6 @@
 import argparse, os
+
+import torchvision
 from omegaconf import OmegaConf
 from pytorch_lightning import seed_everything, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -114,7 +116,7 @@ class PLModel(pl.LightningModule):
         else:
             loss = total_loss
 
-        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
+        # img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         return eeg_z, img_z, img, loss
 
@@ -126,6 +128,7 @@ class PLModel(pl.LightningModule):
                  batch_size=batch_size)
 
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         similarity = (eeg_z @ img_z.T)
         top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
@@ -170,7 +173,14 @@ class PLModel(pl.LightningModule):
         self.pix_corr = calculate_pixcorr(img_recon, img)
         self.ssim = calculate_ssim(img_recon, img)
 
+        grid = torchvision.utils.make_grid(img_recon)
+        self.logger.experiment.add_image(
+            'training_images',
+            grid,
+        )
+
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         similarity = (eeg_z @ img_z.T)
         top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
@@ -212,7 +222,14 @@ class PLModel(pl.LightningModule):
         self.pix_corr = calculate_pixcorr(img_recon, img)
         self.ssim = calculate_ssim(img_recon, img)
 
+        grid = torchvision.utils.make_grid(img_recon)
+        self.logger.experiment.add_image(
+            'training_images',
+            grid,
+        )
+
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
         similarity = (eeg_z @ img_z.T)
         top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
         self.all_predicted_classes.append(top_k_indices.cpu().numpy())
@@ -336,7 +353,7 @@ def run_experiment(args):
         config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
         config['seed'] = seed
         config['timesteps'] = [start_time, end_time]
-        config['info'] = f'-ubp-[{start_time},{end_time}]-dropout0.2-bn'
+        config['info'] = f'-ubp-[{start_time},{end_time}]-dropout0.2'
 
         result = main(config, yaml)
         return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
@@ -368,16 +385,16 @@ def run_experiment_with_retry(params, max_retries=30):
 if __name__ == "__main__":
     eeg_backbones = ['Ours']
     vision_backbones = [('vae', 256)]
-    seeds = range(10)
+    seeds = range(1)
     subs = range(2)
-    start_time = [250]
-    end_time = [600]
+    start_time = [0]
+    end_time = [250]
 
     param_combinations = list(product(eeg_backbones, vision_backbones, seeds, subs, start_time, end_time))
 
     print(f"总共 {len(param_combinations)} 个实验")
 
-    with ProcessPoolExecutor(max_workers=2) as executor:
+    with ProcessPoolExecutor(max_workers=1) as executor:
         future_to_params = {
             executor.submit(run_experiment_with_retry, params): params
             for params in param_combinations
