@@ -17,7 +17,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import torch.nn.functional as F
 ##import user lib
 from data_eeg import load_eeg_data
-from utils import update_config, instantiate_from_config, get_device, ClipLoss, mixco_data
+from utils import update_config, instantiate_from_config, get_device, ClipLoss, mixco_data, marginal_cosine_similarity_loss
 import time
 device = get_device('auto')
 
@@ -47,8 +47,13 @@ class PLModel(pl.LightningModule):
 
         self.z_dim = self.config['models']['brain']['params']['z_dim']
 
-        self.sim = np.ones((len(train_loader.dataset), 80))
-        self.match_label = np.ones((len(train_loader.dataset), 80), dtype=int)
+        if self.config['data']['single_uncertainty_aware']:
+            self.sim = np.ones((len(train_loader.dataset), 80))
+            self.match_label = np.ones((len(train_loader.dataset), 80), dtype=int)
+        else:
+            self.sim = np.ones(len(train_loader.dataset))
+            self.match_label = np.ones(len(train_loader.dataset), dtype=int)
+
         self.alpha = config['alpha']
         self.gamma = 0.3
 
@@ -63,19 +68,26 @@ class PLModel(pl.LightningModule):
         # img = batch['img']
 
         # img_z = batch['img_features']
-        img_z = batch['img_features'][:, :eeg.shape[1], :]
-        print(img_z.shape)
+        if self.config['data']['single_uncertainty_aware']:
+            img_z = batch['img_features'][:, :eeg.shape[1], :]
+        else:
+            img_z = batch['img_features']
+
 
         eeg_z = self.brain(eeg)
-
-        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
 
-        loss, _ = self.criterion(eeg_z.mean(dim=1), img_z.mean(dim=1), logit_scale)
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
+        if self.config['data']['single_uncertainty_aware']:
+            loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z.mean(dim=1), logit_scale)
+        else:
+            loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
 
-        if self.config['data']['uncertainty_aware']:
+        loss = loss
+
+        if self.config['data']['single_uncertainty_aware']:
             for trial_n in range(eeg_z.shape[1]):
                 _, logits_per_image = self.criterion(eeg_z[:, trial_n, :], img_z[:, trial_n, :], logit_scale)
                 diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
@@ -97,7 +109,29 @@ class PLModel(pl.LightningModule):
                 self.sim[idx, trial_n] = batch_sim
                 self.match_label[idx, trial_n] = match_label
 
-        return eeg_z.mean(dim=1), img_z.mean(dim=1), loss
+            return eeg_z.mean(dim=1), img_z.mean(dim=1), loss
+
+        if self.config['data']['uncertainty_aware']:
+            diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
+            gamma = self.gamma
+
+            batch_sim = gamma * diagonal_elements + (1 - gamma) * self.sim[idx]
+
+            mean_sim = np.mean(batch_sim)
+            std_sim = np.std(batch_sim, ddof=1)
+            match_label = np.ones_like(batch_sim)
+            z_alpha_2 = norm.ppf(1 - self.alpha / 2)
+
+            lower_bound = mean_sim - z_alpha_2 * std_sim
+            upper_bound = mean_sim + z_alpha_2 * std_sim
+
+            match_label[diagonal_elements > upper_bound] = 0
+            match_label[diagonal_elements < lower_bound] = 2
+
+            self.sim[idx] = batch_sim
+            self.match_label[idx] = match_label
+
+            return eeg_z.mean(dim=1), img_z, loss
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
@@ -132,13 +166,11 @@ class PLModel(pl.LightningModule):
             self.all_true_labels = []
 
             # counter = Counter(self.match_label)
-            print(self.match_label.flatten())
             counter = Counter(self.match_label.flatten().tolist())
 
             count_dict = dict(counter)
             key_mapping = {0: 'low', 1: 'medium', 2: 'high'}
             count_dict_mapped = {key_mapping[k]: v for k, v in count_dict.items()}
-            print(count_dict_mapped)
             self.log_dict(count_dict_mapped, on_step=False, on_epoch=True, logger=True, sync_dist=True)
             self.trainer.train_dataloader.dataset.match_label = self.match_label
         return loss
@@ -300,7 +332,7 @@ def run_experiment(args):
         config['seed'] = seed
         config['alpha'] = alpha
         config['timesteps'] = [start_time, end_time]
-        config['info'] = f'-subp{alpha}-[{start_time},{end_time}]-dropout0.2'
+        config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.2'
 
         result = main(config, yaml)
         return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
@@ -328,7 +360,6 @@ def run_experiment_with_retry(params, max_retries=30):
     # 所有重试都失败
     return ("", "", "", "", "FAILED", "All retries failed")
 
-
 if __name__ == "__main__":
     eeg_backbones = ['Ours']
     vision_backbones = [('ViT-B-32', 512)]
@@ -336,7 +367,7 @@ if __name__ == "__main__":
     subs = [0, 1]
     start_time = [250]
     end_time = [600]
-    alpha = [0.30]
+    alpha = [0.3]
     param_combinations = list(product(eeg_backbones, vision_backbones, seeds, subs, start_time, end_time, alpha))
 
     print(f"总共 {len(param_combinations)} 个实验")

@@ -27,6 +27,7 @@ data:
   val_batch_size: 200
   test_batch_size: 200
   uncertainty_aware: True
+  single_uncertainty_aware: False
   mixco: True
   blur_type:
     target: inpating_data.FoveaBlur

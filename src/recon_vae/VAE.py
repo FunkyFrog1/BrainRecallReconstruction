@@ -1,65 +1,48 @@
 import PIL.Image
-from diffusers.models.autoencoders import AutoencoderKL
-from diffusers.image_processor import VaeImageProcessor
-import torch.nn.functional as F
 import torch
+import torch.nn.functional as F
+from diffusers.image_processor import VaeImageProcessor
+from diffusers.models.autoencoders import AutoencoderKL
 
 
 class VAEProcessor:
     def __init__(self, vae_path='../../vision_backbone/vae', device='cuda', dtype=torch.bfloat16):
-        """
-        初始化VAE处理器
-
-        参数:
-            vae_path: VAE模型路径
-            device: 运行设备
-            dtype: 数据类型
-        """
         self.device = device
         self.dtype = dtype
 
-        # 加载VAE模型
         self.vae = AutoencoderKL.from_pretrained(
             vae_path,
             torch_dtype=self.dtype
         ).to(device).eval()
 
-        # 设置图像处理器
         vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(
             vae_scale_factor=vae_scale_factor,
             vae_latent_channels=self.vae.config.latent_channels
         )
 
-        # 禁用梯度计算
         for param in self.vae.parameters():
             param.requires_grad = False
 
     def encode_to_latent_dist(self, x):
-        # 预处理图像
         x = self.image_processor.preprocess(x)
 
         with torch.no_grad():
-            # 确保输入数据类型正确
             if x.dtype != self.dtype:
                 x = x.to(self.dtype)
 
-            # 使用VAE编码器
             posterior = self.vae.encode(x).latent_dist
             latent_sample = posterior.sample()
 
             return posterior, latent_sample
 
     def decode_from_latent(self, latent, post_process=True):
-        # 确保潜变量数据类型正确
         if latent.dtype != self.dtype:
             latent = latent.to(self.dtype)
 
         decoded = self.vae.decode(latent).sample
 
-        # 后处理
         if post_process:
-            # 返回张量
             decoded = self.image_processor.postprocess(
                 decoded,
                 output_type="pt",
@@ -102,9 +85,11 @@ def test_vae():
         # 1. 编码为潜在分布
         posterior, latent_sample = vae_processor.encode_to_latent_dist(x)
         print(f"潜在变量形状: {latent_sample.shape}")
+        print(latent_sample)
 
         # 2. 从潜变量解码回图像
-        reconstructed_image = vae_processor.decode_from_latent(latent_sample)
+        reconstructed_image = vae_processor.decode_from_latent(latent_sample, post_process=False)
+        print(reconstructed_image)
         print(f"重建图像形状: {reconstructed_image.shape}")
 
         # 3. 计算重建质量指标
@@ -119,6 +104,7 @@ def test_vae():
 
     except FileNotFoundError:
         print("测试图像未找到，使用随机张量进行测试")
+
 
 def visualize_comparison(original, reconstructed, mse_loss, psnr):
     """

@@ -219,3 +219,44 @@ def mixcut_data_tri(eeg, eeg2, img_z, alpha=1.0, time_ratio=0.5):
 
     mixed_img_z = lam * img_z + (1 - lam) * img_z[indices]
     return mixed_eeg, mixed_eeg2, mixed_img_z
+
+
+def marginal_distance_matrix_similarity_loss(x, y, margin=0.1):
+    x = x / x.norm(dim=-1, keepdim=True)
+    y = y / y.norm(dim=-1, keepdim=True)
+    # 计算余弦相似度矩阵
+    # 使用矩阵乘法：S = normalized_x * normalized_x^T，结果形状为 (B, B)
+    S_x = torch.mm(x, x.t())  # x 的余弦相似度矩阵
+    S_y = torch.mm(y, y.t())  # y 的余弦相似度矩阵
+
+    # 计算两个相似度矩阵的绝对差异
+    diff = torch.abs(S_x - S_y)  # 形状: (B, B)
+
+    # 减去边际并应用 ReLU，只保留差异超过边际的部分
+    loss_matrix = F.relu(diff - margin)  # 形状: (B, B)
+
+    # 计算所有元素的平均值作为最终损失
+    loss = loss_matrix.mean()  # 相当于 (1/B^2) * sum(loss_matrix)
+
+    return loss
+
+
+def marginal_cosine_similarity_loss(z_prime, f, margin=0.1):
+    """
+    z_prime: 投影后的特征 [batch_size, h, w, feature_dim] 或 [batch_size, feature_dim, h, w]
+    f: 基础模型特征 [batch_size, h, w, feature_dim] 或 [batch_size, feature_dim, h, w]
+    margin: 边界参数 m1
+    """
+    # 确保特征维度一致
+    assert z_prime.shape == f.shape
+
+    # 计算余弦相似度
+    cosine_sim = F.cosine_similarity(z_prime, f, dim=-1)  # 在特征维度计算
+
+    # 边际余弦损失
+    loss_per_element = F.relu(1 - margin - cosine_sim)
+
+    # 平均所有空间位置
+    loss = loss_per_element.mean()
+
+    return loss

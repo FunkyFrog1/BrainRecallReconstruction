@@ -199,4 +199,3 @@ def mixcut_data_tri(eeg, eeg2, img_z, alpha=1.0, time_ratio=0.5):
 
     mixed_img_z = lam * img_z + (1 - lam) * img_z[indices]
     return mixed_eeg, mixed_eeg2, mixed_img_z
-

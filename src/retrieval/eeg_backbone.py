@@ -72,6 +72,35 @@ class Ours(nn.Module):
         x = x.view(x.shape[0], n, self.input_dim)
         x = self.model(x)
         return x
+class Ours_bn(nn.Module):
+    def __init__(self, z_dim, c_num, timesteps, drop_proj=0.2):
+        super().__init__()
+        self.z_dim = z_dim
+        self.c_num = c_num
+        self.timesteps = timesteps
+
+        self.input_dim = self.c_num * (self.timesteps[1] - self.timesteps[0])
+        proj_dim = z_dim
+
+        self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
+                                   ResidualAdd(nn.Sequential(
+                                       nn.GELU(),
+                                       nn.Linear(proj_dim, proj_dim),
+                                       nn.Dropout(drop_proj),
+                                   )),)
+        self.bn = nn.BatchNorm1d(proj_dim)
+
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.softplus = nn.Softplus()
+
+    def forward(self, x):
+        B, n, c, d = x.shape
+        x = x.view(x.shape[0], n, self.input_dim)
+        x = self.model(x)
+        x = x.view(B * n, x.shape[-1])
+        x = self.bn(x)
+        x = x.view(B, n, x.shape[-1])
+        return x
 
 
 from models.MoE import MoELayer
@@ -85,19 +114,30 @@ class Ours3(nn.Module):
         self.input_dim = self.c_num * (self.timesteps[1] - self.timesteps[0])
         proj_dim = z_dim
 
-        self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
+        # self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
+        #                            ResidualAdd(nn.Sequential(
+        #                                nn.GELU(),
+        #                                MoELayer(proj_dim, proj_dim),
+        #                                nn.GELU(),
+        #                                nn.Dropout(drop_proj),
+        #                            )),
+        #                            nn.LayerNorm(proj_dim))
+        self.model = nn.Sequential(nn.LayerNorm(self.input_dim),
+                                   nn.Linear(self.input_dim, proj_dim),
+                                   nn.Dropout(drop_proj/2),
                                    ResidualAdd(nn.Sequential(
+                                       nn.LayerNorm(proj_dim),
                                        nn.GELU(),
-                                       MoELayer(proj_dim, proj_dim),
-                                       nn.GELU(),
+                                       nn.Linear(proj_dim, proj_dim),
                                        nn.Dropout(drop_proj),
                                    )),
-                                   nn.LayerNorm(proj_dim))
+                                   nn.LayerNorm(proj_dim),)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
 
     def forward(self, x):
-        x = x.view(x.shape[0], self.input_dim)
+        B, n, c, d = x.shape
+        x = x.view(x.shape[0], n, self.input_dim)
         x = self.model(x)
         return x
 

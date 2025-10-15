@@ -341,7 +341,7 @@ class EEGDataset(Dataset):
         img_path = self.loaded_data[subject]['img'][trial_index]
 
         img = Image.open(os.path.join(self.data_dir, '../../data/images_set', img_path))
-        img = self.resize_for_vae(img)
+        img = self.resize_for_vae(img).bfloat16()
 
         match_label = self.match_label[index]
 
