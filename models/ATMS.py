@@ -133,7 +133,7 @@ class Proj_eeg(nn.Sequential):
                 nn.Linear(proj_dim, proj_dim),
                 nn.Dropout(drop_proj),
             )),
-            nn.LayerNorm(proj_dim),
+            # nn.LayerNorm(proj_dim),
         )
 
 
@@ -151,6 +151,7 @@ class ATMS(nn.Module):
 
     def forward(self, x):
         subject_ids = torch.zeros((x.shape[0])).long().to(x.device)
+        x = x.mean(dim=1)
         x = self.encoder(x, None, subject_ids)
         eeg_embedding = self.enc_eeg(x)
         out = self.proj_eeg(eeg_embedding)

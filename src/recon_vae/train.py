@@ -64,6 +64,7 @@ class PLModel(pl.LightningModule):
         self.vae_mse = 0
         self.pix_corr = 0
         self.ssim = 0
+        self.img_ref = None
 
     def forward(self, batch, sample_posterior=False):
 
@@ -75,22 +76,11 @@ class PLModel(pl.LightningModule):
 
         eeg_z = self.brain(eeg)
 
-        if self.config['data']['mixco']:
-            eeg_mixed, img_z_mixed, _ = mixco_data(eeg, img_z)
-            eeg_z_mixed = self.brain(eeg_mixed)
-
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
 
         _, logits_per_image = self.criterion(eeg_z, img_z, logit_scale)
-        loss = F.mse_loss(eeg_z, img_z)
-
-        if self.config['data']['mixco']:
-            loss_mixed, _ = self.criterion(eeg_z_mixed, img_z_mixed, logit_scale)
-            total_loss = loss * 0.5 + loss_mixed * 0.5
-
-        else:
-            total_loss = loss
+        total_loss = F.mse_loss(eeg_z, img_z)
 
         if self.config['data']['uncertainty_aware']:
             diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
@@ -122,7 +112,13 @@ class PLModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
-        eeg_z, img_z, _, loss = self(batch, sample_posterior=True)
+        eeg_z, img_z, _, _ = self(batch, sample_posterior=True)
+
+        img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
+        with torch.no_grad():
+            img_ref_traing = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4))
+        self.vae_mse = F.mse_loss(img_recon, img_ref_traing)
+        loss = self.vae_mse
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
@@ -168,16 +164,26 @@ class PLModel(pl.LightningModule):
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
 
-        img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4))
-        self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
-        self.pix_corr = calculate_pixcorr(img_recon, img)
-        self.ssim = calculate_ssim(img_recon, img)
+        with torch.no_grad():
+            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4))
+            if self.img_ref is None:
+                self.img_ref = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4))
+            self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
+            self.pix_corr = calculate_pixcorr(img_recon, img)
+            self.ssim = calculate_ssim(img_recon, img)
 
-        grid = torchvision.utils.make_grid(img_recon)
-        self.logger.experiment.add_image(
-            'training_images',
-            grid,
-        )
+            grid = torchvision.utils.make_grid(img_recon)
+            self.logger.experiment.add_image(
+                'val_images',
+                grid,
+                global_step=self.global_step
+            )
+            grid = torchvision.utils.make_grid(self.img_ref)
+            self.logger.experiment.add_image(
+                'ref_images',
+                grid,
+                global_step=self.global_step
+            )
 
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
         img_z = img_z / img_z.norm(dim=-1, keepdim=True)
@@ -217,16 +223,17 @@ class PLModel(pl.LightningModule):
         self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
 
-        img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4))
-        self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
-        self.pix_corr = calculate_pixcorr(img_recon, img)
-        self.ssim = calculate_ssim(img_recon, img)
+        with torch.no_grad:
+            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4))
+            self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
+            self.pix_corr = calculate_pixcorr(img_recon, img)
+            self.ssim = calculate_ssim(img_recon, img)
 
-        grid = torchvision.utils.make_grid(img_recon)
-        self.logger.experiment.add_image(
-            'training_images',
-            grid,
-        )
+            grid = torchvision.utils.make_grid(img_recon)
+            self.logger.experiment.add_image(
+                'test_images',
+                grid,
+            )
 
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
         img_z = img_z / img_z.norm(dim=-1, keepdim=True)
@@ -345,7 +352,7 @@ from itertools import product
 def run_experiment(args):
     eeg_backbone, vision_backbone, seed, sub, start_time, end_time = args
     try:
-        yaml = "../../configs/baseline_ubp.yaml"
+        yaml = "../../configs/baseline_ubp_vae.yaml"
         config = OmegaConf.load(yaml)
         config['eeg_backbone'] = eeg_backbone
         config['vision_backbone'] = vision_backbone[0]
@@ -383,10 +390,10 @@ def run_experiment_with_retry(params, max_retries=30):
 
 
 if __name__ == "__main__":
-    eeg_backbones = ['Ours']
+    eeg_backbones = ['EEGProject', 'Ours']
     vision_backbones = [('vae', 256)]
     seeds = range(1)
-    subs = range(2)
+    subs = [1, 0]
     start_time = [0]
     end_time = [250]
 

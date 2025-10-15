@@ -50,22 +50,15 @@ class VAEProcessor:
 
             return posterior, latent_sample
 
-    def decode_from_latent(self, latent, return_pil=False):
+    def decode_from_latent(self, latent, post_process=True):
         # 确保潜变量数据类型正确
         if latent.dtype != self.dtype:
             latent = latent.to(self.dtype)
 
-        # 使用VAE解码器
-        with torch.no_grad():
-            decoded = self.vae.decode(latent).sample
+        decoded = self.vae.decode(latent).sample
 
         # 后处理
-        if return_pil:
-            # 返回PIL图像
-            decoded = self.image_processor.postprocess(
-                decoded, output_type="pil", do_denormalize=[True]
-            )
-        else:
+        if post_process:
             # 返回张量
             decoded = self.image_processor.postprocess(
                 decoded,
