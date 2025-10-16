@@ -214,6 +214,7 @@ data/*
 # src
 src/retrieval/exp
 src/recon_vae/exp
+src/retrieval_visual_guided/exp
 
 # visionbackbone
 vision_backbone

@@ -65,6 +65,7 @@ class PLModel(pl.LightningModule):
     def forward(self, batch, sample_posterior=False):
         idx = batch['idx'].cpu().detach().numpy()
         eeg = batch['eeg']
+        eeg_v = batch['eeg_v']
         # img = batch['img']
 
         # img_z = batch['img_features']
@@ -73,8 +74,7 @@ class PLModel(pl.LightningModule):
         else:
             img_z = batch['img_features']
 
-
-        eeg_z = self.brain(eeg)
+        eeg_z = self.brain(eeg, eeg_v)
 
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
@@ -83,7 +83,7 @@ class PLModel(pl.LightningModule):
         if self.config['data']['single_uncertainty_aware']:
             loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z.mean(dim=1), logit_scale)
         else:
-            loss, logits_per_image = self.criterion(eeg_z, img_z, logit_scale)
+            loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
 
         loss = loss
 
@@ -131,7 +131,7 @@ class PLModel(pl.LightningModule):
             self.sim[idx] = batch_sim
             self.match_label[idx] = match_label
 
-            return eeg_z, img_z, loss
+            return eeg_z.mean(dim=1), img_z, loss
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
@@ -360,12 +360,13 @@ def run_experiment_with_retry(params, max_retries=30):
     return ("", "", "", "", "FAILED", "All retries failed")
 
 if __name__ == "__main__":
-    smoke_test = True
+    smoke_test = False
 
-    eeg_backbones = ['ATMS']
+    eeg_backbones = ['Ours']
     vision_backbones = [('ViT-B-32', 512)]
     seeds = range(10)
     subs = [0, 1]
+    start_time = [250]
     start_time = [250]
     end_time = [600]
     alpha = [0.05]

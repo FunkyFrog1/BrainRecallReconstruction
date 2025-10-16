@@ -163,9 +163,9 @@ class PLModel(pl.LightningModule):
         eeg_z, img_z, img, loss = self(batch)
 
         with torch.no_grad():
-            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
+            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
             if self.img_ref is None:
-                self.img_ref = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
+                self.img_ref = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
             self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
             loss = self.vae_mse
             self.pix_corr = calculate_pixcorr(img_recon, img)
@@ -223,7 +223,7 @@ class PLModel(pl.LightningModule):
         eeg_z, img_z, img, loss = self(batch)
 
         with torch.no_grad:
-            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
+            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
             self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
             loss = self.vae_mse
             self.pix_corr = calculate_pixcorr(img_recon, img)
@@ -361,21 +361,19 @@ from itertools import product
 
 def run_experiment(args):
     eeg_backbone, vision_backbone, seed, sub, start_time, end_time = args
-    try:
-        yaml = "../../configs/baseline_ubp_vae.yaml"
-        config = OmegaConf.load(yaml)
-        config['eeg_backbone'] = eeg_backbone
-        config['vision_backbone'] = vision_backbone[0]
-        config['models']['brain']['params']['z_dim'] = vision_backbone[1]
-        config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
-        config['seed'] = seed
-        config['timesteps'] = [start_time, end_time]
-        config['info'] = f'-ubp-[{start_time},{end_time}]'
+    yaml = "../../configs/baseline_ubp_vae.yaml"
+    config = OmegaConf.load(yaml)
+    config['eeg_backbone'] = eeg_backbone
+    config['vision_backbone'] = vision_backbone[0]
+    config['models']['brain']['params']['z_dim'] = vision_backbone[1]
+    config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
+    config['seed'] = seed
+    config['timesteps'] = [start_time, end_time]
+    config['info'] = f'-ubp-[{start_time},{end_time}]'
 
-        result = main(config, yaml)
-        return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
-    except Exception as e:
-        return (eeg_backbone, vision_backbone, seed, sub, "ERROR", str(e))
+    result = main(config, yaml)
+    return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
+
 
 
 def run_experiment_with_retry(params, max_retries=30):
@@ -400,50 +398,55 @@ def run_experiment_with_retry(params, max_retries=30):
 
 
 if __name__ == "__main__":
-    eeg_backbones = ['ATMS']
+    smoke_test = None
+    eeg_backbones = ['EEGProject']
     vision_backbones = [('vae', 256)]
     seeds = range(1)
     subs = [1]
     start_time = [0]
-    end_time = [250]
+    end_time = [275]
 
     param_combinations = list(product(eeg_backbones, vision_backbones, seeds, subs, start_time, end_time))
 
     print(f"总共 {len(param_combinations)} 个实验")
 
-    with ProcessPoolExecutor(max_workers=1) as executor:
-        future_to_params = {
-            executor.submit(run_experiment_with_retry, params): params
-            for params in param_combinations
-        }
+    if smoke_test:
+        for params in param_combinations:
+            run_experiment(params)
+    else:
+        with ProcessPoolExecutor(max_workers=1) as executor:
+            future_to_params = {
+                executor.submit(run_experiment_with_retry, params): params
+                for params in param_combinations
+            }
 
-        completed = 0
-        errors = 0
+            completed = 0
+            errors = 0
 
-        for future in as_completed(future_to_params):
-            params = future_to_params[future]
-            eeg_backbone, vision_backbone, seed, sub, start_t, end_t = params
+            for future in as_completed(future_to_params):
+                params = future_to_params[future]
+                eeg_backbone, vision_backbone, seed, sub, start_t, end_t = params
 
-            try:
-                result = future.result()
-                status = result[4]
+                try:
+                    result = future.result()
+                    status = result[4]
 
-                if status == "SUCCESS":
-                    print(
-                        f"✅ 完成: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
-                    completed += 1
-                else:
-                    print(
-                        f"❌ 最终失败: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
-                    print(f"   错误信息: {result[5]}")
+                    if status == "SUCCESS":
+                        print(
+                            f"✅ 完成: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
+                        completed += 1
+                    else:
+                        print(
+                            f"❌ 最终失败: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
+                        print(f"   错误信息: {result[5]}")
+                        errors += 1
+
+                except Exception as e:
+                    print(f"❌ 未知错误: {e}")
                     errors += 1
 
-            except Exception as e:
-                print(f"❌ 未知错误: {e}")
-                errors += 1
-
-            # 进度显示
-            if (completed + errors) % 10 == 0:
-                print(f"进度: {completed + errors}/{len(param_combinations)}")
+                # 进度显示
+                if (completed + errors) % 10 == 0:
+                    print(f"进度: {completed + errors}/{len(param_combinations)}")
 
     print(f"实验完成! 成功: {completed}, 失败: {errors}")

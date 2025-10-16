@@ -133,7 +133,7 @@ class Proj_eeg(nn.Sequential):
                 nn.Linear(proj_dim, proj_dim),
                 nn.Dropout(drop_proj),
             )),
-            # nn.LayerNorm(proj_dim),
+            nn.LayerNorm(proj_dim),
         )
 
 
@@ -147,7 +147,6 @@ class ATMS(nn.Module):
         self.proj_eeg = Proj_eeg(proj_dim=z_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
-
 
     def forward(self, x):
         subject_ids = torch.zeros((x.shape[0])).long().to(x.device)
