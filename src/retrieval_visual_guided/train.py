@@ -17,8 +17,8 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import torch.nn.functional as F
 ##import user lib
 from data_eeg import load_eeg_data
-from utils import update_config, instantiate_from_config, get_device, ClipLoss, mixco_data
-
+from utils import update_config, instantiate_from_config, get_device, ClipLoss, mixco_data, marginal_cosine_similarity_loss
+import time
 device = get_device('auto')
 
 
@@ -47,9 +47,14 @@ class PLModel(pl.LightningModule):
 
         self.z_dim = self.config['models']['brain']['params']['z_dim']
 
-        self.sim = np.ones(len(train_loader.dataset))
-        self.match_label = np.ones(len(train_loader.dataset), dtype=int)
-        self.alpha = 0.05
+        if self.config['data']['single_uncertainty_aware']:
+            self.sim = np.ones((len(train_loader.dataset), 80))
+            self.match_label = np.ones((len(train_loader.dataset), 80), dtype=int)
+        else:
+            self.sim = np.ones(len(train_loader.dataset))
+            self.match_label = np.ones(len(train_loader.dataset), dtype=int)
+
+        self.alpha = config['alpha']
         self.gamma = 0.3
 
         self.mAP_total = 0
@@ -58,33 +63,60 @@ class PLModel(pl.LightningModule):
         # self.load_state_dict(torch.load())
 
     def forward(self, batch, sample_posterior=False):
-
         idx = batch['idx'].cpu().detach().numpy()
-        eeg = batch['eeg'].mean(dim=1)
-        img = batch['img']
+        eeg = batch['eeg']
+        eeg_v = batch['eeg_v']
+        # img = batch['img']
 
-        img_z = batch['img_features']
+        # img_z = batch['img_features']
+        if self.config['data']['single_uncertainty_aware']:
+            img_z = batch['img_features'][:, :eeg.shape[1], :]
+        else:
+            img_z = batch['img_features']
 
-        eeg_z = self.brain(eeg)
-
-        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
-
-        if self.config['data']['mixco']:
-            eeg_mixed, img_z_mixed, _ = mixco_data(eeg, img_z)
-            eeg_z_mixed = self.brain(eeg_mixed)
+        eeg_z, eeg_z_r = self.brain(eeg, eeg_v)
 
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
 
-        loss, logits_per_image = self.criterion(eeg_z, img_z, logit_scale)
-
-        if self.config['data']['mixco']:
-            loss_mixed, _ = self.criterion(eeg_z_mixed, img_z_mixed, logit_scale)
-            total_loss = loss * 0.5 + loss_mixed * 0.5
-
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
+        if self.config['data']['single_uncertainty_aware']:
+            loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z.mean(dim=1), logit_scale)
         else:
-            total_loss = loss
+            if self.current_epoch < self.config['train']['epoch']:
+                loss, _ = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
+                _, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
+            else:
+                loss_teacher, _ = self.criterion(eeg_z.mean(dim=1).detach(), eeg_z_r.mean(dim=1), logit_scale)
+                loss, _ = self.criterion(eeg_z_r.mean(dim=1), img_z, logit_scale)
+                loss = loss * 1.0 + loss_teacher * 0.1
+                _, logits_per_image = self.criterion(eeg_z_r.mean(dim=1), img_z, logit_scale)
 
+        loss = loss
+
+        if self.config['data']['single_uncertainty_aware']:
+            for trial_n in range(eeg_z.shape[1]):
+                _, logits_per_image = self.criterion(eeg_z[:, trial_n, :], img_z[:, trial_n, :], logit_scale)
+                diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
+                gamma = self.gamma
+
+                batch_sim = gamma * diagonal_elements + (1 - gamma) * self.sim[idx, trial_n]
+
+                mean_sim = np.mean(batch_sim)
+                std_sim = np.std(batch_sim, ddof=1)
+                match_label = np.ones_like(batch_sim)
+                z_alpha_2 = norm.ppf(1 - self.alpha / 2)
+
+                lower_bound = mean_sim - z_alpha_2 * std_sim
+                upper_bound = mean_sim + z_alpha_2 * std_sim
+
+                match_label[diagonal_elements > upper_bound] = 0
+                match_label[diagonal_elements < lower_bound] = 2
+
+                self.sim[idx, trial_n] = batch_sim
+                self.match_label[idx, trial_n] = match_label
+
+            return eeg_z_r.mean(dim=1), img_z.mean(dim=1), loss
 
         if self.config['data']['uncertainty_aware']:
             diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
@@ -106,11 +138,10 @@ class PLModel(pl.LightningModule):
             self.sim[idx] = batch_sim
             self.match_label[idx] = match_label
 
-            loss = total_loss
-        else:
-            loss = total_loss
-
-        return eeg_z, img_z, loss
+            if self.current_epoch < self.config['train']['epoch']:
+                return eeg_z.mean(dim=1), img_z, loss
+            else:
+                return eeg_z_r.mean(dim=1), img_z, loss
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
@@ -144,7 +175,9 @@ class PLModel(pl.LightningModule):
             self.all_predicted_classes = []
             self.all_true_labels = []
 
-            counter = Counter(self.match_label)
+            # counter = Counter(self.match_label)
+            counter = Counter(self.match_label.flatten().tolist())
+
             count_dict = dict(counter)
             key_mapping = {0: 'low', 1: 'medium', 2: 'high'}
             count_dict_mapped = {key_mapping[k]: v for k, v in count_dict.items()}
@@ -259,25 +292,25 @@ def main(config, yaml):
 
     checkpoint_callback = ModelCheckpoint(save_last=True)
 
-    if config['exp_setting'] == 'inter-subject':
-        early_stop_callback = EarlyStopping(
-            monitor='val_top1_acc',
-            min_delta=0.001,
-            patience=5,
-            verbose=False,
-            mode='max'
-        )
-    else:
-        early_stop_callback = EarlyStopping(
-            monitor='train_loss',
-            min_delta=0.001,
-            patience=5,
-            verbose=False,
-            mode='min'
-        )
+    # if config['exp_setting'] == 'inter-subject':
+    #     early_stop_callback = EarlyStopping(
+    #         monitor='val_top1_acc',
+    #         min_delta=0.001,
+    #         patience=5,
+    #         verbose=False,
+    #         mode='max'
+    #     )
+    # else:
+    #     early_stop_callback = EarlyStopping(
+    #         monitor='train_loss',
+    #         min_delta=0.001,
+    #         patience=5,
+    #         verbose=False,
+    #         mode='min'
+    #     )
 
     trainer = Trainer(log_every_n_steps=10, #strategy=DDPStrategy(find_unused_parameters=False),
-                      callbacks=[early_stop_callback, checkpoint_callback], max_epochs=config['train']['epoch'],
+                      callbacks=[ checkpoint_callback], max_epochs=config['train']['epoch'] * 2,
                       devices=[device], accelerator='cuda', logger=logger)
     print(trainer.logger.log_dir)
 
@@ -293,23 +326,102 @@ def main(config, yaml):
         json.dump(test_results, f, indent=4)
 
 
-if __name__ == "__main__":
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import product
+
+
+def run_experiment(args):
+    eeg_backbone, vision_backbone, seed, sub, start_time, end_time, alpha = args
+
     yaml = "../../configs/baseline_ubp.yaml"
     config = OmegaConf.load(yaml)
-    for eeg_backbone in ['EEGProject']:
-        config['eeg_backbone'] = eeg_backbone
-        for vision_backbone in [('ViT-B-32', 512)]:
-            config['vision_backbone'] = vision_backbone[0]
-            config['models']['brain']['params']['z_dim'] = vision_backbone[1]
-            for mixco in [True]:
-                if mixco:
-                    config['data']['mixco'] = True
-                    config['info'] = '-ubp-mixco-test'
-                else:
-                    config['data']['mixco'] = False
-                    config['info'] = '-ubp-test'
-                for sub in [1]:
-                    config['data']['subjects'] = [f'sub-{(sub+1):02d}']
-                    for seed in range(10):
-                        config['seed'] = seed
-                        main(config, yaml)
+    config['eeg_backbone'] = eeg_backbone
+    config['vision_backbone'] = vision_backbone[0]
+    config['models']['brain']['params']['z_dim'] = vision_backbone[1]
+    config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
+    config['seed'] = seed
+    config['alpha'] = alpha
+    config['timesteps'] = [start_time, end_time]
+    config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.2'
+
+    result = main(config, yaml)
+    return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
+
+
+
+def run_experiment_with_retry(params, max_retries=30):
+    """带重试的实验运行函数"""
+    for attempt in range(max_retries):
+        try:
+            result = run_experiment(params)
+            status = result[4]
+            if status == "SUCCESS":
+                return result
+            else:
+                print(result[-1])
+                print(f"⚠️ 任务失败，{300}秒后重试 (尝试 {attempt + 1}/{max_retries})")
+        except Exception as e:
+            print(f"⚠️ 进程异常，{300}秒后重试 (尝试 {attempt + 1}/{max_retries}): {e}")
+
+        if attempt < max_retries - 1:  # 不是最后一次尝试
+            time.sleep(300)  # 等待5分钟
+
+    # 所有重试都失败
+    return ("", "", "", "", "FAILED", "All retries failed")
+
+if __name__ == "__main__":
+    smoke_test = True
+
+    eeg_backbones = ['Ours']
+    vision_backbones = [('ViT-B-32', 512)]
+    seeds = range(10)
+    subs = [0, 1]
+    start_time = [250]
+    end_time = [600]
+    alpha = [0.05]
+    param_combinations = list(product(eeg_backbones, vision_backbones, seeds, subs, start_time, end_time, alpha))
+
+    print(f"总共 {len(param_combinations)} 个实验")
+
+    if smoke_test:
+        for params in param_combinations:
+            run_experiment(params)
+            break
+
+    else:
+        with ProcessPoolExecutor(max_workers=10) as executor:
+            future_to_params = {
+                executor.submit(run_experiment_with_retry, params): params
+                for params in param_combinations
+            }
+
+            completed = 0
+            errors = 0
+
+            for future in as_completed(future_to_params):
+                params = future_to_params[future]
+                eeg_backbone, vision_backbone, seed, sub, start_t, end_t, _ = params
+
+                try:
+                    result = future.result()
+                    status = result[4]
+
+                    if status == "SUCCESS":
+                        print(
+                            f"✅ 完成: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
+                        completed += 1
+                    else:
+                        print(
+                            f"❌ 最终失败: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
+                        print(f"   错误信息: {result[5]}")
+                        errors += 1
+
+                except Exception as e:
+                    print(f"❌ 未知错误: {e}")
+                    errors += 1
+
+                # 进度显示
+                if (completed + errors) % 10 == 0:
+                    print(f"进度: {completed + errors}/{len(param_combinations)}")
+    #
+    # print(f"实验完成! 成功: {completed}, 失败: {errors}")

@@ -1,4 +1,6 @@
 import argparse, os
+
+import torchvision
 from omegaconf import OmegaConf
 from pytorch_lightning import seed_everything, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -21,7 +23,7 @@ from utils import update_config, instantiate_from_config, get_device, ClipLoss, 
 import time
 device = get_device('auto')
 from VAE import VAEProcessor
-from evaluation_methods import calculate_pixcorr
+from evaluation_methods import calculate_pixcorr, calculate_ssim
 
 
 def load_model(config, train_loader, test_loader):
@@ -61,6 +63,8 @@ class PLModel(pl.LightningModule):
         self.vae = VAEProcessor()
         self.vae_mse = 0
         self.pix_corr = 0
+        self.ssim = 0
+        self.img_ref = None
 
     def forward(self, batch, sample_posterior=False):
 
@@ -72,22 +76,11 @@ class PLModel(pl.LightningModule):
 
         eeg_z = self.brain(eeg)
 
-        if self.config['data']['mixco']:
-            eeg_mixed, img_z_mixed, _ = mixco_data(eeg, img_z)
-            eeg_z_mixed = self.brain(eeg_mixed)
-
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
 
         _, logits_per_image = self.criterion(eeg_z, img_z, logit_scale)
-        loss = F.mse_loss(eeg_z, img_z)
-
-        if self.config['data']['mixco']:
-            loss_mixed, _ = self.criterion(eeg_z_mixed, img_z_mixed, logit_scale)
-            total_loss = loss * 0.5 + loss_mixed * 0.5
-
-        else:
-            total_loss = loss
+        total_loss = F.mse_loss(eeg_z, img_z)
 
         if self.config['data']['uncertainty_aware']:
             diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
@@ -113,18 +106,25 @@ class PLModel(pl.LightningModule):
         else:
             loss = total_loss
 
-        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
+        # img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         return eeg_z, img_z, img, loss
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
-        eeg_z, img_z, _, loss = self(batch, sample_posterior=True)
+        eeg_z, img_z, _, _ = self(batch, sample_posterior=True)
+
+        img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
+        with torch.no_grad():
+            img_ref_traing = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
+        self.vae_mse = F.mse_loss(img_recon, img_ref_traing)
+        loss = self.vae_mse
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
 
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         similarity = (eeg_z @ img_z.T)
         top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
@@ -161,14 +161,33 @@ class PLModel(pl.LightningModule):
         batch_size = batch['idx'].shape[0]
 
         eeg_z, img_z, img, loss = self(batch)
+
+        with torch.no_grad():
+            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
+            if self.img_ref is None:
+                self.img_ref = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
+            self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
+            loss = self.vae_mse
+            self.pix_corr = calculate_pixcorr(img_recon, img)
+            self.ssim = calculate_ssim(img_recon, img)
+            grid = torchvision.utils.make_grid(img_recon)
+            self.logger.experiment.add_image(
+                'val_images',
+                grid,
+                global_step=self.global_step
+            )
+            grid = torchvision.utils.make_grid(self.img_ref)
+            self.logger.experiment.add_image(
+                'ref_images',
+                grid,
+                global_step=self.global_step
+            )
+
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
 
-        img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4))
-        self.vae_mse = F.mse_loss(img_recon, img)
-        self.pix_corr = calculate_pixcorr(img_recon, img)
-
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         similarity = (eeg_z @ img_z.T)
         top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
@@ -194,20 +213,32 @@ class PLModel(pl.LightningModule):
                  sync_dist=True)
         self.log('pix_corr', self.pix_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True,
                  sync_dist=True)
+        self.log('ssim', self.ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True,
+                 sync_dist=True)
         self.all_predicted_classes = []
         self.all_true_labels = []
 
     def test_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
         eeg_z, img_z, img, loss = self(batch)
+
+        with torch.no_grad():
+            img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
+            self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
+            loss = self.vae_mse
+            self.pix_corr = calculate_pixcorr(img_recon, img)
+            self.ssim = calculate_ssim(img_recon, img)
+            grid = torchvision.utils.make_grid(img_recon)
+            self.logger.experiment.add_image(
+                'test_images',
+                grid,
+            )
+
         self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
 
-        img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4))
-        self.vae_mse = F.mse_loss(img_recon, img)
-        self.pix_corr = calculate_pixcorr(img_recon, img)
-
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
+        img_z = img_z / img_z.norm(dim=-1, keepdim=True)
         similarity = (eeg_z @ img_z.T)
         top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
         self.all_predicted_classes.append(top_k_indices.cpu().numpy())
@@ -247,6 +278,7 @@ class PLModel(pl.LightningModule):
         self.log('similarity', self.match_similarities, sync_dist=True)
         self.log('vae_mse', self.vae_mse, sync_dist=True)
         self.log('pix_corr', self.pix_corr, sync_dist=True)
+        self.log('ssim', self.ssim, sync_dist=True)
 
         self.all_predicted_classes = []
         self.all_true_labels = []
@@ -259,8 +291,16 @@ class PLModel(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = globals()[self.config['train']['optimizer']](self.parameters(), lr=self.config['train']['lr'],
                                                                  weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config['train']['epoch'])
 
-        return [optimizer]
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            }
+        }
 
 
 def main(config, yaml):
@@ -321,21 +361,19 @@ from itertools import product
 
 def run_experiment(args):
     eeg_backbone, vision_backbone, seed, sub, start_time, end_time = args
-    try:
-        yaml = "../../configs/baseline_ubp.yaml"
-        config = OmegaConf.load(yaml)
-        config['eeg_backbone'] = eeg_backbone
-        config['vision_backbone'] = vision_backbone[0]
-        config['models']['brain']['params']['z_dim'] = vision_backbone[1]
-        config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
-        config['seed'] = seed
-        config['timesteps'] = [start_time, end_time]
-        config['info'] = f'-ubp-[{start_time},{end_time}]-dropout0.2-mixup'
+    yaml = "../../configs/baseline_ubp_vae.yaml"
+    config = OmegaConf.load(yaml)
+    config['eeg_backbone'] = eeg_backbone
+    config['vision_backbone'] = vision_backbone[0]
+    config['models']['brain']['params']['z_dim'] = vision_backbone[1]
+    config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
+    config['seed'] = seed
+    config['timesteps'] = [start_time, end_time]
+    config['info'] = f'-ubp-[{start_time},{end_time}]_b8'
 
-        result = main(config, yaml)
-        return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
-    except Exception as e:
-        return (eeg_backbone, vision_backbone, seed, sub, "ERROR", str(e))
+    result = main(config, yaml)
+    return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
+
 
 
 def run_experiment_with_retry(params, max_retries=30):
@@ -360,10 +398,11 @@ def run_experiment_with_retry(params, max_retries=30):
 
 
 if __name__ == "__main__":
+    smoke_test = False
     eeg_backbones = ['Ours']
     vision_backbones = [('vae', 256)]
-    seeds = range(10)
-    subs = range(2)
+    seeds = range(1)
+    subs = [1]
     start_time = [250]
     end_time = [600]
 
@@ -371,39 +410,43 @@ if __name__ == "__main__":
 
     print(f"总共 {len(param_combinations)} 个实验")
 
-    with ProcessPoolExecutor(max_workers=10) as executor:
-        future_to_params = {
-            executor.submit(run_experiment_with_retry, params): params
-            for params in param_combinations
-        }
+    if smoke_test:
+        for params in param_combinations:
+            run_experiment(params)
+    else:
+        with ProcessPoolExecutor(max_workers=1) as executor:
+            future_to_params = {
+                executor.submit(run_experiment_with_retry, params): params
+                for params in param_combinations
+            }
 
-        completed = 0
-        errors = 0
+            completed = 0
+            errors = 0
 
-        for future in as_completed(future_to_params):
-            params = future_to_params[future]
-            eeg_backbone, vision_backbone, seed, sub, start_t, end_t = params
+            for future in as_completed(future_to_params):
+                params = future_to_params[future]
+                eeg_backbone, vision_backbone, seed, sub, start_t, end_t = params
 
-            try:
-                result = future.result()
-                status = result[4]
+                try:
+                    result = future.result()
+                    status = result[4]
 
-                if status == "SUCCESS":
-                    print(
-                        f"✅ 完成: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
-                    completed += 1
-                else:
-                    print(
-                        f"❌ 最终失败: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
-                    print(f"   错误信息: {result[5]}")
+                    if status == "SUCCESS":
+                        print(
+                            f"✅ 完成: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
+                        completed += 1
+                    else:
+                        print(
+                            f"❌ 最终失败: EEG={eeg_backbone}, Vision={vision_backbone[0]}, Seed={seed}, Sub={sub + 1:02d}, Time=[{start_t}-{end_t}]")
+                        print(f"   错误信息: {result[5]}")
+                        errors += 1
+
+                except Exception as e:
+                    print(f"❌ 未知错误: {e}")
                     errors += 1
 
-            except Exception as e:
-                print(f"❌ 未知错误: {e}")
-                errors += 1
-
-            # 进度显示
-            if (completed + errors) % 10 == 0:
-                print(f"进度: {completed + errors}/{len(param_combinations)}")
+                # 进度显示
+                if (completed + errors) % 10 == 0:
+                    print(f"进度: {completed + errors}/{len(param_combinations)}")
 
     print(f"实验完成! 成功: {completed}, 失败: {errors}")

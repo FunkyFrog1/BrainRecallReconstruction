@@ -148,9 +148,9 @@ class ATMS(nn.Module):
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
 
-
     def forward(self, x):
         subject_ids = torch.zeros((x.shape[0])).long().to(x.device)
+        x = x.mean(dim=1)
         x = self.encoder(x, None, subject_ids)
         eeg_embedding = self.enc_eeg(x)
         out = self.proj_eeg(eeg_embedding)

@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from models.ATMS import ATMS as ATMLayer
 
 
@@ -41,62 +41,6 @@ class EEGProject(nn.Module):
 
 
 class Ours(nn.Module):
-    def __init__(self, z_dim, c_num, timesteps, drop_proj=0.7):
-        super().__init__()
-        self.z_dim = z_dim
-        self.c_num = c_num
-        self.timesteps = timesteps
-
-        self.input_dim = self.c_num * (self.timesteps[1] - self.timesteps[0])
-        proj_dim = z_dim
-
-        self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
-                                   ResidualAdd(nn.Sequential(
-                                       nn.GELU(),
-                                       nn.Linear(proj_dim, proj_dim),
-                                       nn.Dropout(drop_proj),
-                                   )),
-                                   nn.LayerNorm(proj_dim))
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        self.softplus = nn.Softplus()
-        self._init_weights()
-
-    def forward(self, x):
-        B, n, c, d = x.shape
-        x = x.view(x.shape[0], n, self.input_dim)
-        x = self.model(x)
-        return x
-
-    def _init_weights(self):
-        """参数初始化 - 使用Kaiming/He初始化方法"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                # print(m)
-                # 使用Kaiming初始化（针对GELU激活函数）
-                nn.init.kaiming_normal_(m.weight,
-                                        nonlinearity='relu')  # GELU在零点附近类似ReLU
-
-                # 偏置项初始化为零
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-
-# LLaMA使用的RMSNorm实现
-class LLaMARMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
-
-
-class Ours2(nn.Module):
     def __init__(self, z_dim, c_num, timesteps, drop_proj=0.2):
         super().__init__()
         self.z_dim = z_dim
@@ -106,7 +50,15 @@ class Ours2(nn.Module):
         self.input_dim = self.c_num * (self.timesteps[1] - self.timesteps[0])
         proj_dim = z_dim
 
-        self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
+        self.visual = nn.Sequential(nn.Linear(17 * 250, proj_dim),
+                                   ResidualAdd(nn.Sequential(
+                                       nn.GELU(),
+                                       nn.Linear(proj_dim, proj_dim),
+                                       nn.Dropout(drop_proj),
+                                   )),
+                                   nn.LayerNorm(proj_dim))
+
+        self.recall = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
                                    ResidualAdd(nn.Sequential(
                                        nn.GELU(),
                                        nn.Linear(proj_dim, proj_dim),
@@ -117,28 +69,15 @@ class Ours2(nn.Module):
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
 
-        # self._init_weight()
+    def forward(self, x_r, x_v):
+        B, n, c, d = x_r.shape
+        x_v = x_v.view(x_v.shape[0], n, -1)
+        x_r = x_r.view(x_r.shape[0], n, self.input_dim)
 
+        x_v = self.visual(x_v)
+        x_r = self.recall(x_r)
 
-    def forward(self, x):
-        B, n, c, d = x.shape
-        x = x.view(x.shape[0], n, self.input_dim)
-        x = self.model(x)
-        return x
-
-    def _init_weights(self):
-        """参数初始化 - 使用Kaiming/He初始化方法"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                # print(m)
-                # 使用Kaiming初始化（针对GELU激活函数）
-                nn.init.kaiming_normal_(m.weight,
-                                        nonlinearity='relu')  # GELU在零点附近类似ReLU
-
-                # 偏置项初始化为零
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
+        return x_v, x_r
 
 class ATMS(ATMLayer):
     def __init__(self, z_dim, c_num, timesteps):

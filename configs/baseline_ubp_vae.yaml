@@ -15,20 +15,19 @@ models:
   brain:
     target: "eeg_backbone.${eeg_backbone}"
     params:
-        c_num: 27
+        c_num: 17
         z_dim: 1280
         timesteps: ${timesteps}
 
 data:
   subjects: ['sub-10']
-#  selected_ch: ['P7', 'P5', 'P3', 'P1','Pz', 'P2', 'P4', 'P6', 'P8', 'PO7', 'PO3', 'POz', 'PO4', 'PO8','O1', 'Oz', 'O2']
-  selected_ch: ['FT9', 'FT7', 'FT8', 'FT10', 'T7', 'T8', 'TP9', 'TP7', 'TP8', 'TP10', 'P7', 'P5', 'P3', 'P1','Pz', 'P2', 'P4', 'P6', 'P8', 'PO7', 'PO3', 'POz', 'PO4', 'PO8','O1', 'Oz', 'O2']
+  selected_ch: ['P7', 'P5', 'P3', 'P1','Pz', 'P2', 'P4', 'P6', 'P8', 'PO7', 'PO3', 'POz', 'PO4', 'PO8','O1', 'Oz', 'O2']
+
   model_type: ${vision_backbone}
-  train_batch_size: 1024
+  train_batch_size: 8
   val_batch_size: 200
   test_batch_size: 200
   uncertainty_aware: True
-  single_uncertainty_aware: False
   mixco: True
   blur_type:
     target: inpating_data.FoveaBlur
@@ -43,8 +42,8 @@ data:
   timesteps: ${timesteps}
 
 train:
-  epoch: 50
+  epoch: 40
   optimizer: AdamW
-  lr: 1e-4
+  lr: 3e-4
 
 save_dir: 'exp'

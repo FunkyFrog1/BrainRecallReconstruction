@@ -1,16 +1,15 @@
 import gc
-import os
 
-import matplotlib.pyplot as plt
 import numpy as np
 import open_clip
+import os
 import torch
 from PIL import Image
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from torchvision import transforms
-from tqdm import tqdm
+from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 
 from utils import instantiate_from_config, get_device
 
@@ -129,11 +128,6 @@ class EEGDataset(Dataset):
         if self.selected_ch == "None":
             self.selected_ch = self.channels
 
-        self.resize_for_vae = transforms.Compose([
-            transforms.Lambda(lambda x: x.convert("RGB")),  # 确保图像为RGB模式
-            transforms.ToTensor()
-        ])
-
         self.avg = config['data'][f"{mode}_avg"]
         self.blur_type = config['data']['blur_type']
         self.timesteps = config['data']['timesteps']
@@ -173,20 +167,17 @@ class EEGDataset(Dataset):
         else:
             self.blur_transform = instantiate_from_config(config['data']['blur_type'])
 
-        if self.model_type == 'vae':
-            process_term = [
-                transforms.ToTensor(),
-            ]
-        else:
-            process_term = [
-                transforms.ToTensor(),
-                transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(
-                    0.26862954, 0.26130258, 0.27577711))
-            ]
-
+        process_term = [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(
+            0.26862954, 0.26130258, 0.27577711))
+        ]
         self.process_transform = transforms.Compose(process_term)
 
-        self.match_label = np.ones(self.trial_all_subjects, dtype=int)
+        if self.config['data']['single_uncertainty_aware']:
+            self.match_label = np.ones((self.trial_all_subjects, self.per_trials), dtype=int)
+        elif self.config['data']['uncertainty_aware']:
+            self.match_label = np.ones(self.trial_all_subjects, dtype=int)
 
         if os.path.exists(features_filename):
             saved_features = torch.load(features_filename, weights_only=False)
@@ -198,8 +189,7 @@ class EEGDataset(Dataset):
             if self.model_type == 'vae':
                 from diffusers.models.autoencoders import AutoencoderKL
                 from diffusers.image_processor import VaeImageProcessor
-                self.vlmodel = AutoencoderKL.from_pretrained('../../vision_backbone/vae',
-                                                             torch_dtype=torch.bfloat16).to(device).eval()
+                self.vlmodel = AutoencoderKL.from_pretrained('../../vision_backbone/vae', torch_dtype=torch.bfloat16).to(device).eval()
                 vae_scale_factor = 2 ** (len(self.vlmodel.config.block_out_channels) - 1)
                 self.image_processor = VaeImageProcessor(
                     vae_scale_factor=vae_scale_factor, vae_latent_channels=self.vlmodel.config.latent_channels
@@ -243,6 +233,8 @@ class EEGDataset(Dataset):
         loaded_data = torch.load(data_path, weights_only=False)
         loaded_data['eeg'] = torch.from_numpy(loaded_data['eeg'])
 
+
+
         if self.selected_ch:
             selected_idx = [self.channels.index(ch) for ch in self.selected_ch]
             loaded_data['eeg'] = loaded_data['eeg'][:, :, selected_idx]
@@ -250,7 +242,7 @@ class EEGDataset(Dataset):
 
         if self.avg:
             avg_data = {}
-            avg_data['eeg'] = loaded_data['eeg']  # .mean(axis=1)
+            avg_data['eeg'] = loaded_data['eeg']#.mean(axis=1)
             avg_data['label'] = loaded_data['label'][:, 0]
             avg_data['img'] = loaded_data['img'][:, 0]
             avg_data['text'] = loaded_data['text'][:, 0]
@@ -280,36 +272,31 @@ class EEGDataset(Dataset):
         set_images.sort()
         batch_size = 128
         image_features_list = []
-        for i in tqdm(range(0, len(set_images), batch_size)):
+        for i in range(0, len(set_images), batch_size):
             batch_images = set_images[i:i + batch_size]
 
             device = next(self.vlmodel.parameters()).device
 
             if self.model_type == 'vae':
                 ele = [self.image_processor.preprocess(
-                    self.process_transform(
-                        blur_transform(
-                            Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224))
-                        )
-                        .resize((32, 32)))
-                )
+                    blur_transform(
+                        Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224))).resize(
+                        (32, 32)))
                     for
                     img in batch_images
                 ]
                 processed_images = torch.concat(ele).to(device)
                 processed_images = processed_images.to(device=device, dtype=torch.bfloat16)
                 latent_dist = self.vlmodel.encode(processed_images).latent_dist
-
                 batch_image_features = latent_dist.sample().flatten(1, -1)
             else:
                 ele = [self.process_transform(
-                    blur_transform(
-                        Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224)))) for
+                    blur_transform(Image.open(os.path.join('../../data/images_set', img)).convert("RGB").resize((224, 224)))) for
                     img in batch_images]
                 image_inputs = torch.stack(ele).to(device)
                 batch_image_features = self.vlmodel.encode_image(image_inputs)
 
-            # batch_image_features = batch_image_features / batch_image_features.norm(dim=-1, keepdim=True)
+            batch_image_features = batch_image_features / batch_image_features.norm(dim=-1, keepdim=True)
             image_features_list.append(batch_image_features)
         image_features = torch.cat(image_features_list, dim=0)
         image_features_dict = {set_images[i]: image_features[i].float().cpu() for i in range(len(set_images))}
@@ -340,12 +327,27 @@ class EEGDataset(Dataset):
         label = self.loaded_data[subject]['label'][trial_index]
         img_path = self.loaded_data[subject]['img'][trial_index]
 
-        img = Image.open(os.path.join(self.data_dir, '../../data/images_set', img_path))
-        img = self.resize_for_vae(img).bfloat16()
+        img = 'None'  # Image.open(os.path.join(self.data_dir,'../Image_set_Resize',img_path)).convert("RGB")
 
         match_label = self.match_label[index]
 
-        if self.config['data']['uncertainty_aware']:
+        if self.config['data']['single_uncertainty_aware']:
+            img_features = []
+            for trial_n in range(self.per_trials):
+                if self.mode == 'train':
+                    if match_label[trial_n] == 0:
+                        tag = 'low'
+                    elif match_label[trial_n] == 2:
+                        tag = 'high'
+                    else:
+                        tag = 'medium'
+                else:
+                    tag = 'medium'
+
+                img_features.append(self.img_features[tag][img_path])
+            img_features = torch.stack(img_features)
+
+        elif self.config['data']['uncertainty_aware']:
             if self.mode == 'train':
                 if match_label == 0:
                     tag = 'low'
@@ -356,6 +358,7 @@ class EEGDataset(Dataset):
             else:
                 tag = 'medium'
             img_features = self.img_features[tag][img_path]
+
         else:
             img_features = self.img_features[img_path]
 
@@ -366,6 +369,7 @@ class EEGDataset(Dataset):
         sample = {
             'idx': index,
             'eeg': eeg[:, :, self.timesteps[0]:self.timesteps[1]],
+            'eeg_v': eeg[:, :, 25:275],
             'label': label,
             'img_path': img_path,
             'img': img,

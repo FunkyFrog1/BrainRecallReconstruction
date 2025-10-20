@@ -9,7 +9,6 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from torchvision import transforms
-from tqdm import tqdm
 from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 
 from utils import instantiate_from_config, get_device
@@ -175,7 +174,10 @@ class EEGDataset(Dataset):
         ]
         self.process_transform = transforms.Compose(process_term)
 
-        self.match_label = np.ones(self.trial_all_subjects, dtype=int)
+        if self.config['data']['single_uncertainty_aware']:
+            self.match_label = np.ones((self.trial_all_subjects, self.per_trials), dtype=int)
+        elif self.config['data']['uncertainty_aware']:
+            self.match_label = np.ones(self.trial_all_subjects, dtype=int)
 
         if os.path.exists(features_filename):
             saved_features = torch.load(features_filename, weights_only=False)
@@ -270,7 +272,7 @@ class EEGDataset(Dataset):
         set_images.sort()
         batch_size = 128
         image_features_list = []
-        for i in tqdm(range(0, len(set_images), batch_size)):
+        for i in range(0, len(set_images), batch_size):
             batch_images = set_images[i:i + batch_size]
 
             device = next(self.vlmodel.parameters()).device
@@ -329,7 +331,23 @@ class EEGDataset(Dataset):
 
         match_label = self.match_label[index]
 
-        if self.config['data']['uncertainty_aware']:
+        if self.config['data']['single_uncertainty_aware']:
+            img_features = []
+            for trial_n in range(self.per_trials):
+                if self.mode == 'train':
+                    if match_label[trial_n] == 0:
+                        tag = 'low'
+                    elif match_label[trial_n] == 2:
+                        tag = 'high'
+                    else:
+                        tag = 'medium'
+                else:
+                    tag = 'medium'
+
+                img_features.append(self.img_features[tag][img_path])
+            img_features = torch.stack(img_features)
+
+        elif self.config['data']['uncertainty_aware']:
             if self.mode == 'train':
                 if match_label == 0:
                     tag = 'low'
@@ -340,6 +358,7 @@ class EEGDataset(Dataset):
             else:
                 tag = 'medium'
             img_features = self.img_features[tag][img_path]
+
         else:
             img_features = self.img_features[img_path]
 

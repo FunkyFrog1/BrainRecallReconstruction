@@ -147,12 +147,6 @@ def calculate_ssim(
         >>> ssim_scores = calculate_ssim(original, reconstructed, reduction='none')
         >>> print(f'Per-image SSIM: {ssim_scores}')
     """
-    # Input validation
-    if original_batch.shape != recon_batch.shape:
-        raise ValueError(
-            f"Input batch shapes must match. Got {original_batch.shape} vs {recon_batch.shape}"
-        )
-
     if original_batch.dim() != 4:
         raise ValueError(f"Expected 4D input (B, C, H, W), got {original_batch.dim()}D")
 
@@ -165,8 +159,8 @@ def calculate_ssim(
     ])
 
     try:
-        original_batch = preprocess(original_batch)
-        recon_batch = preprocess(recon_batch)
+        original_batch = preprocess(original_batch).float()
+        recon_batch = preprocess(recon_batch).float()
     except Exception as e:
         raise RuntimeError(f"Image preprocessing failed: {e}")
 
