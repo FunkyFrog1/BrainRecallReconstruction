@@ -221,3 +221,6 @@ vision_backbone
 # stage3
 Stage3
 
+# pytorch_ssim
+pytorch_ssim/__init__.py
+

@@ -222,7 +222,7 @@ class PLModel(pl.LightningModule):
         batch_size = batch['idx'].shape[0]
         eeg_z, img_z, img, loss = self(batch)
 
-        with torch.no_grad:
+        with torch.no_grad():
             img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
             self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
             loss = self.vae_mse
@@ -369,7 +369,7 @@ def run_experiment(args):
     config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
     config['seed'] = seed
     config['timesteps'] = [start_time, end_time]
-    config['info'] = f'-ubp-[{start_time},{end_time}]'
+    config['info'] = f'-ubp-[{start_time},{end_time}]_b8'
 
     result = main(config, yaml)
     return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
@@ -398,13 +398,13 @@ def run_experiment_with_retry(params, max_retries=30):
 
 
 if __name__ == "__main__":
-    smoke_test = None
-    eeg_backbones = ['EEGProject']
+    smoke_test = False
+    eeg_backbones = ['Ours']
     vision_backbones = [('vae', 256)]
     seeds = range(1)
     subs = [1]
-    start_time = [0]
-    end_time = [275]
+    start_time = [250]
+    end_time = [600]
 
     param_combinations = list(product(eeg_backbones, vision_backbones, seeds, subs, start_time, end_time))
 

@@ -74,7 +74,7 @@ class PLModel(pl.LightningModule):
         else:
             img_z = batch['img_features']
 
-        eeg_z = self.brain(eeg, eeg_v)
+        eeg_z, eeg_z_r = self.brain(eeg, eeg_v)
 
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
@@ -83,7 +83,14 @@ class PLModel(pl.LightningModule):
         if self.config['data']['single_uncertainty_aware']:
             loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z.mean(dim=1), logit_scale)
         else:
-            loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
+            if self.current_epoch < self.config['train']['epoch']:
+                loss, _ = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
+                _, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
+            else:
+                loss_teacher, _ = self.criterion(eeg_z.mean(dim=1).detach(), eeg_z_r.mean(dim=1), logit_scale)
+                loss, _ = self.criterion(eeg_z_r.mean(dim=1), img_z, logit_scale)
+                loss = loss * 1.0 + loss_teacher * 0.1
+                _, logits_per_image = self.criterion(eeg_z_r.mean(dim=1), img_z, logit_scale)
 
         loss = loss
 
@@ -109,7 +116,7 @@ class PLModel(pl.LightningModule):
                 self.sim[idx, trial_n] = batch_sim
                 self.match_label[idx, trial_n] = match_label
 
-            return eeg_z.mean(dim=1), img_z.mean(dim=1), loss
+            return eeg_z_r.mean(dim=1), img_z.mean(dim=1), loss
 
         if self.config['data']['uncertainty_aware']:
             diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
@@ -131,7 +138,10 @@ class PLModel(pl.LightningModule):
             self.sim[idx] = batch_sim
             self.match_label[idx] = match_label
 
-            return eeg_z.mean(dim=1), img_z, loss
+            if self.current_epoch < self.config['train']['epoch']:
+                return eeg_z.mean(dim=1), img_z, loss
+            else:
+                return eeg_z_r.mean(dim=1), img_z, loss
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
@@ -282,25 +292,25 @@ def main(config, yaml):
 
     checkpoint_callback = ModelCheckpoint(save_last=True)
 
-    if config['exp_setting'] == 'inter-subject':
-        early_stop_callback = EarlyStopping(
-            monitor='val_top1_acc',
-            min_delta=0.001,
-            patience=5,
-            verbose=False,
-            mode='max'
-        )
-    else:
-        early_stop_callback = EarlyStopping(
-            monitor='train_loss',
-            min_delta=0.001,
-            patience=5,
-            verbose=False,
-            mode='min'
-        )
+    # if config['exp_setting'] == 'inter-subject':
+    #     early_stop_callback = EarlyStopping(
+    #         monitor='val_top1_acc',
+    #         min_delta=0.001,
+    #         patience=5,
+    #         verbose=False,
+    #         mode='max'
+    #     )
+    # else:
+    #     early_stop_callback = EarlyStopping(
+    #         monitor='train_loss',
+    #         min_delta=0.001,
+    #         patience=5,
+    #         verbose=False,
+    #         mode='min'
+    #     )
 
     trainer = Trainer(log_every_n_steps=10, #strategy=DDPStrategy(find_unused_parameters=False),
-                      callbacks=[early_stop_callback, checkpoint_callback], max_epochs=config['train']['epoch'],
+                      callbacks=[ checkpoint_callback], max_epochs=config['train']['epoch'] * 2,
                       devices=[device], accelerator='cuda', logger=logger)
     print(trainer.logger.log_dir)
 
@@ -360,13 +370,12 @@ def run_experiment_with_retry(params, max_retries=30):
     return ("", "", "", "", "FAILED", "All retries failed")
 
 if __name__ == "__main__":
-    smoke_test = False
+    smoke_test = True
 
     eeg_backbones = ['Ours']
     vision_backbones = [('ViT-B-32', 512)]
     seeds = range(10)
     subs = [0, 1]
-    start_time = [250]
     start_time = [250]
     end_time = [600]
     alpha = [0.05]

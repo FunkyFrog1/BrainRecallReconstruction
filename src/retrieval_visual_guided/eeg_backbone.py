@@ -50,17 +50,22 @@ class Ours(nn.Module):
         self.input_dim = self.c_num * (self.timesteps[1] - self.timesteps[0])
         proj_dim = z_dim
 
-        self.visual = nn.Linear(17 * 250, proj_dim)
-        self.recall = nn.Linear(self.input_dim, proj_dim)
+        self.visual = nn.Sequential(nn.Linear(17 * 250, proj_dim),
+                                   ResidualAdd(nn.Sequential(
+                                       nn.GELU(),
+                                       nn.Linear(proj_dim, proj_dim),
+                                       nn.Dropout(drop_proj),
+                                   )),
+                                   nn.LayerNorm(proj_dim))
 
-        self.model = nn.Sequential(
-            ResidualAdd(nn.Sequential(
-                nn.GELU(),
-                nn.Linear(proj_dim, proj_dim),
-                nn.Dropout(drop_proj),
-            )),
-            nn.LayerNorm(proj_dim)
-        )
+        self.recall = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
+                                   ResidualAdd(nn.Sequential(
+                                       nn.GELU(),
+                                       nn.Linear(proj_dim, proj_dim),
+                                       nn.Dropout(drop_proj),
+                                   )),
+                                   nn.LayerNorm(proj_dim))
+
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
 
@@ -72,29 +77,7 @@ class Ours(nn.Module):
         x_v = self.visual(x_v)
         x_r = self.recall(x_r)
 
-        # if self.training:
-        #     x = x_r
-        # else:
-        #     x = x_r
-
-        if self.training:
-            # 方法7: 使用Gumbel-Softmax进行可微分选择
-            logits = torch.randn(3, device=x_r.device)  # 三个选项的logits
-
-            # Gumbel-Softmax采样
-            weights = F.gumbel_softmax(logits, tau=1.0, hard=False)
-
-            # 计算混合权重
-            alpha = torch.rand(1, device=x_r.device)
-            mixed = alpha * x_r + (1 - alpha) * x_v
-
-            # 加权组合
-            x = weights[0] * x_r + weights[1] * x_v + weights[2] * mixed
-        else:
-            x = x_r
-
-        x = self.model(x)
-        return x
+        return x_v, x_r
 
 class ATMS(ATMLayer):
     def __init__(self, z_dim, c_num, timesteps):

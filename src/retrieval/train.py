@@ -83,6 +83,7 @@ class PLModel(pl.LightningModule):
         if self.config['data']['single_uncertainty_aware']:
             loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z.mean(dim=1), logit_scale)
         else:
+            eeg_z = eeg_z.mean(dim=1)
             loss, logits_per_image = self.criterion(eeg_z, img_z, logit_scale)
 
         loss = loss
@@ -332,7 +333,7 @@ def run_experiment(args):
     config['seed'] = seed
     config['alpha'] = alpha
     config['timesteps'] = [start_time, end_time]
-    config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.2'
+    config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.7-heinit-OPT'
 
     result = main(config, yaml)
     return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
@@ -360,9 +361,9 @@ def run_experiment_with_retry(params, max_retries=30):
     return ("", "", "", "", "FAILED", "All retries failed")
 
 if __name__ == "__main__":
-    smoke_test = True
+    smoke_test = False
 
-    eeg_backbones = ['ATMS']
+    eeg_backbones = ['Ours']
     vision_backbones = [('ViT-B-32', 512)]
     seeds = range(10)
     subs = [0, 1]
@@ -413,5 +414,5 @@ if __name__ == "__main__":
                 # 进度显示
                 if (completed + errors) % 10 == 0:
                     print(f"进度: {completed + errors}/{len(param_combinations)}")
-    #
-    # print(f"实验完成! 成功: {completed}, 失败: {errors}")
+
+        print(f"实验完成! 成功: {completed}, 失败: {errors}")
