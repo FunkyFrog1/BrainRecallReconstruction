@@ -15,7 +15,7 @@ class ResidualAdd(nn.Module):
 
 
 class EEGProject(nn.Module):
-    def __init__(self, z_dim, c_num, timesteps, drop_proj=0.2):
+    def __init__(self, z_dim, c_num, timesteps, drop_proj=0.3):
         super(EEGProject, self).__init__()
         self.z_dim = z_dim
         self.c_num = c_num
@@ -52,7 +52,7 @@ class Ours(nn.Module):
 
         self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
                                    ResidualAdd(nn.Sequential(
-                                       nn.GELU(),
+                                       nn.SiLU(),
                                        nn.Linear(proj_dim, proj_dim),
                                        nn.Dropout(drop_proj),
                                    )),
@@ -63,7 +63,7 @@ class Ours(nn.Module):
 
     def forward(self, x):
         B, n, c, d = x.shape
-        x = x.view(x.shape[0], n, self.input_dim)
+        x = x.view(B, n, self.input_dim)
         x = self.model(x)
         return x
 
@@ -71,11 +71,9 @@ class Ours(nn.Module):
         """参数初始化 - 使用Kaiming/He初始化方法"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                # print(m)
                 # 使用Kaiming初始化（针对GELU激活函数）
                 nn.init.kaiming_normal_(m.weight,
                                         nonlinearity='relu')  # GELU在零点附近类似ReLU
-
                 # 偏置项初始化为零
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)

@@ -24,7 +24,7 @@ import time
 device = get_device('auto')
 from VAE import VAEProcessor
 from evaluation_methods import calculate_pixcorr, calculate_ssim
-
+from pytorch_ssim import SSIM
 
 def load_model(config, train_loader, test_loader):
     model = {}
@@ -45,6 +45,7 @@ class PLModel(pl.LightningModule):
         for key, value in model.items():
             setattr(self, f"{key}", value)
         self.criterion = ClipLoss()
+        self.ssim_loss = SSIM()
 
         self.all_predicted_classes = []
         self.all_true_labels = []
@@ -118,7 +119,8 @@ class PLModel(pl.LightningModule):
         with torch.no_grad():
             img_ref_traing = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
         self.vae_mse = F.mse_loss(img_recon, img_ref_traing)
-        loss = self.vae_mse
+        loss_ssim = 1 - self.ssim_loss(img_recon, img_ref_traing)
+        loss = self.vae_mse + loss_ssim
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
@@ -127,7 +129,7 @@ class PLModel(pl.LightningModule):
         img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         similarity = (eeg_z @ img_z.T)
-        top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
+        top_kvalues, top_k_indices = similarity.topk(min(5, img_z.shape[0]), dim=-1)
         self.all_predicted_classes.append(top_k_indices.cpu().numpy())
         label = torch.arange(0, batch_size).to(self.device)
         self.all_true_labels.extend(label.cpu().numpy())
@@ -190,7 +192,7 @@ class PLModel(pl.LightningModule):
         img_z = img_z / img_z.norm(dim=-1, keepdim=True)
 
         similarity = (eeg_z @ img_z.T)
-        top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
+        top_kvalues, top_k_indices = similarity.topk(min(5, img_z.shape[0]), dim=-1)
         self.all_predicted_classes.append(top_k_indices.cpu().numpy())
         label = torch.arange(0, batch_size).to(self.device)
         self.all_true_labels.extend(label.cpu().numpy())
@@ -224,7 +226,8 @@ class PLModel(pl.LightningModule):
 
         with torch.no_grad():
             img_recon = self.vae.decode_from_latent(eeg_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=True)
-            self.vae_mse = F.mse_loss(F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear'), img)
+            img_recon = F.interpolate(img_recon, size=img.size()[-2:], mode='bilinear')
+            self.vae_mse = F.mse_loss(img_recon, img)
             loss = self.vae_mse
             self.pix_corr = calculate_pixcorr(img_recon, img)
             self.ssim = calculate_ssim(img_recon, img)
@@ -240,7 +243,7 @@ class PLModel(pl.LightningModule):
         eeg_z = eeg_z / eeg_z.norm(dim=-1, keepdim=True)
         img_z = img_z / img_z.norm(dim=-1, keepdim=True)
         similarity = (eeg_z @ img_z.T)
-        top_kvalues, top_k_indices = similarity.topk(5, dim=-1)
+        top_kvalues, top_k_indices = similarity.topk(min(5, img_z.shape[0]), dim=-1)
         self.all_predicted_classes.append(top_k_indices.cpu().numpy())
         # label =  batch['label']
         label = torch.arange(0, batch_size).to(self.device)
@@ -339,7 +342,7 @@ def main(config, yaml):
         )
 
     trainer = Trainer(log_every_n_steps=10, #strategy=DDPStrategy(find_unused_parameters=False),
-                      callbacks=[early_stop_callback, checkpoint_callback], max_epochs=config['train']['epoch'],
+                      callbacks=[checkpoint_callback], max_epochs=config['train']['epoch'],
                       devices=[device], accelerator='cuda', logger=logger)
     print(trainer.logger.log_dir)
 
@@ -369,11 +372,10 @@ def run_experiment(args):
     config['data']['subjects'] = [f'sub-{(sub + 1):02d}']
     config['seed'] = seed
     config['timesteps'] = [start_time, end_time]
-    config['info'] = f'-ubp-[{start_time},{end_time}]_b8'
+    config['info'] = f'-ubp-[{start_time},{end_time}]_b1'
 
     result = main(config, yaml)
     return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
-
 
 
 def run_experiment_with_retry(params, max_retries=30):
@@ -398,7 +400,7 @@ def run_experiment_with_retry(params, max_retries=30):
 
 
 if __name__ == "__main__":
-    smoke_test = False
+    smoke_test = True
     eeg_backbones = ['Ours']
     vision_backbones = [('vae', 256)]
     seeds = range(1)
@@ -449,4 +451,4 @@ if __name__ == "__main__":
                 if (completed + errors) % 10 == 0:
                     print(f"进度: {completed + errors}/{len(param_combinations)}")
 
-    print(f"实验完成! 成功: {completed}, 失败: {errors}")
+        print(f"实验完成! 成功: {completed}, 失败: {errors}")
