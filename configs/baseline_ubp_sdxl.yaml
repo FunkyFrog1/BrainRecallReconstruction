@@ -44,7 +44,7 @@ data:
   timesteps: ${timesteps}
 
 train:
-  epoch: 50
+  epoch: 40
   optimizer: AdamW
   lr: 1e-4
 

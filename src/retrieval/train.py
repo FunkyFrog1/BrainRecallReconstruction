@@ -19,6 +19,8 @@ import torch.nn.functional as F
 from data_eeg import load_eeg_data
 from utils import update_config, instantiate_from_config, get_device, ClipLoss, mixco_data, marginal_cosine_similarity_loss
 import time
+import matplotlib.pyplot as plt
+
 device = get_device('auto')
 
 
@@ -72,7 +74,6 @@ class PLModel(pl.LightningModule):
             img_z = batch['img_features'][:, :eeg.shape[1], :]
         else:
             img_z = batch['img_features']
-
 
         eeg_z = self.brain(eeg)
 
@@ -208,6 +209,12 @@ class PLModel(pl.LightningModule):
         self.all_true_labels = []
 
     def test_step(self, batch, batch_idx):
+        layer = self.brain.model[0]
+
+        # 可选：记录到 TensorBoard（如果您使用 PyTorch Lightning 的 logger）
+        # if hasattr(self, 'logger') and self.logger is not None:
+        #     self.logger.experiment.add_figure(f"weight_heatmap_batch_{batch_idx}", plt.gcf(), batch_idx)
+
         batch_size = batch['idx'].shape[0]
         eeg_z, img_z, loss = self(batch)
         self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
@@ -333,11 +340,10 @@ def run_experiment(args):
     config['seed'] = seed
     config['alpha'] = alpha
     config['timesteps'] = [start_time, end_time]
-    config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.7-heinit-OPT'
+    config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.7-heinit-OP-SiLU-preln'
 
     result = main(config, yaml)
     return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
-
 
 
 def run_experiment_with_retry(params, max_retries=30):
@@ -359,6 +365,7 @@ def run_experiment_with_retry(params, max_retries=30):
 
     # 所有重试都失败
     return ("", "", "", "", "FAILED", "All retries failed")
+
 
 if __name__ == "__main__":
     smoke_test = False

@@ -84,7 +84,7 @@ def load_eeg_data(config, exp_setting='intra-subject'):
         test_loader = DataLoader(test_dataset, batch_size=config['data']['test_batch_size'], shuffle=False,
                                  drop_last=False, num_workers=25, pin_memory=True)
         train_loader = DataLoader(train_dataset, batch_size=config['data']['train_batch_size'], shuffle=True,
-                                  drop_last=True, num_workers=63, pin_memory=True)
+                                  drop_last=False, num_workers=63, pin_memory=True)
         return train_loader, test_loader, test_loader
 
     elif exp_setting == 'inter-subject':
@@ -208,7 +208,7 @@ class EEGDataset(Dataset):
             else:
                 self.vlmodel, _, _ = open_clip.create_model_and_transforms(
                     model_name=self.model_type,
-                    pretrained=f'../{self.model_type}/open_clip_model.safetensors',
+                    pretrained=f'../../vision_backbone/{self.model_type}/open_clip_model.safetensors',
                     device=device,
                     require_pretrained=True
                 )

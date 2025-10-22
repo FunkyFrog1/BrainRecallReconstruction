@@ -5,7 +5,7 @@ from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.autoencoders import AutoencoderKL
 
 
-class VAEProcessor:
+class VAEProcessor():
     def __init__(self, vae_path='../../vision_backbone/vae', device='cuda', dtype=torch.bfloat16):
         self.device = device
         self.dtype = dtype

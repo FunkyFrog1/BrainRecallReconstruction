@@ -310,7 +310,7 @@ def main(config, yaml):
     #     )
 
     trainer = Trainer(log_every_n_steps=10, #strategy=DDPStrategy(find_unused_parameters=False),
-                      callbacks=[ checkpoint_callback], max_epochs=config['train']['epoch'] * 2,
+                      callbacks=[checkpoint_callback], max_epochs=config['train']['epoch'] * 2,
                       devices=[device], accelerator='cuda', logger=logger)
     print(trainer.logger.log_dir)
 
