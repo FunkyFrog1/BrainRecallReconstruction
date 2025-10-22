@@ -240,7 +240,7 @@ class EmbedDiffusion(nn.Module):
         self.embed_dim = embed_dim
 
         # 扩散先验模型
-        self.diffusion_prior = DiffusionPriorUNet(cond_dim=1280)
+        self.diffusion_prior = DiffusionPriorUNet(cond_dim=1280, dropout=0.1)
 
         # 扩散调度器
         from diffusers.schedulers import DDPMScheduler
@@ -269,7 +269,7 @@ class EmbedDiffusion(nn.Module):
             # 计算损失
             loss = self.criterion(generated_embeds, h_embeds)
 
-            return generated_embeds, loss
+            return generated_embeds, loss.mean()
 
         else:
             raw_embeds = c_embeds

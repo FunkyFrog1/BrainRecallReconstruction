@@ -112,7 +112,7 @@ def load_eeg_data(config, exp_setting='intra-subject'):
 class EEGDataset(Dataset):
     def __init__(self, config, mode):
         self.config = config
-        self.data_dir = '../../data/EEG_ViRe'
+        self.data_dir = '../../data/EEG'
         self.subjects = config['data']['subjects']
         print(f'subjects:{self.subjects}')
         self.mode = mode

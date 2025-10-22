@@ -236,7 +236,9 @@ class PLModel(pl.LightningModule):
                 'test_images',
                 grid,
             )
-            print(grid, self.logger.log_dir)
+            os.makedirs(f'./{self.logger.log_dir}/img', exist_ok=True)
+            for index, img in enumerate(img_recon):
+                torchvision.utils.save_image(img, f'./{self.logger.log_dir}/img/{index}.png')
 
         self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
