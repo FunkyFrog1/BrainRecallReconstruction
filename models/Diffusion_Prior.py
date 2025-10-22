@@ -91,9 +91,9 @@ class DiffusionPriorUNet(nn.Module):
 
     def __init__(
             self,
-            embed_dim=1024,
+            embed_dim=1280,
             cond_dim=42,
-            hidden_dim=[1024, 512, 256, 128, 64],
+            hidden_dim=[1280, 512, 256, 128, 64],
             time_embed_dim=512,
             act_fn=nn.SiLU,
             dropout=0.0,
@@ -199,8 +199,6 @@ class DiffusionPriorUNet(nn.Module):
 
         return x
 
-
-
         idx_c = self.label2index[self.labels[idx]]
         return {
             "c_embedding": self.embedding_vise[idx_c],
@@ -237,38 +235,24 @@ def add_noise_with_sigma(
 
 # diffusion pipe
 class EmbedDiffusion(nn.Module):
-    def __init__(self, embed_dim=512, cond_dim=512, hidden_dim=512):
+    def __init__(self, embed_dim=1280):
         super().__init__()
         self.embed_dim = embed_dim
 
         # 扩散先验模型
-        self.diffusion_prior = DiffusionPrior(
-            embed_dim=embed_dim,
-            cond_dim=cond_dim,
-            hidden_dim=hidden_dim,
-        )
+        self.diffusion_prior = DiffusionPriorUNet(cond_dim=1280)
 
         # 扩散调度器
         from diffusers.schedulers import DDPMScheduler
         self.scheduler = DDPMScheduler()
 
         # 损失函数
-        self.criterion = nn.MSELoss()
+        self.criterion = nn.MSELoss(reduction='none')
+
+        self.device = 'cuda'
 
     def forward(self, c_embeds=None, h_embeds=None, guidance_drop_prob=0.1, use_gen=False,
-                num_inference_steps=50, guidance_scale=5.0, generator=None):
-        """
-        前向传播方法
-
-        Args:
-            c_embeds: 条件嵌入
-            h_embeds: 目标嵌入（训练时必需）
-            guidance_drop_prob: 训练时的条件丢弃概率
-            use_gen: 是否使用generate方法生成
-            num_inference_steps: generate的推理步数
-            guidance_scale: generate的引导强度
-            generator: 随机数生成器
-        """
+                num_inference_steps=10, guidance_scale=2.0, generator=None):
 
         if use_gen:
             # 使用generate方法进行完整生成
@@ -280,16 +264,15 @@ class EmbedDiffusion(nn.Module):
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 generator=generator,
-                return_intermediates=False
             )
 
-            # 如果提供了目标嵌入，可以计算评估指标
-            if h_embeds is not None:
-                # 计算相似度等评估指标
-                mse_loss = F.mse_loss(generated_embeds, h_embeds)
-                return generated_embeds, mse_loss
+            # 计算损失
+            loss = self.criterion(generated_embeds, h_embeds)
+
+            return generated_embeds, loss
 
         else:
+            raw_embeds = c_embeds
             if self.training:
                 # 随机条件丢弃
                 if c_embeds is not None and torch.rand(1) < guidance_drop_prob:
@@ -309,60 +292,50 @@ class EmbedDiffusion(nn.Module):
 
             # 计算损失
             loss = self.criterion(noise_pred, noise)
+            loss = loss.mean()  # 确保正确的reduction
 
-            # 计算去噪后的嵌入
-            alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1)
-            generated_embeds = (perturbed_h_embeds - (1 - alpha_prod_t).sqrt() * noise_pred) / alpha_prod_t.sqrt()
+            return raw_embeds, loss
 
-            return generated_embeds, loss
+    def generate(
+            self,
+            c_embeds=None,
+            num_inference_steps=10,
+            timesteps=None,
+            guidance_scale=2.0,
+            generator=None
+    ):
+        self.device = c_embeds.device
+        # c_embeds (batch_size, cond_dim)
+        self.diffusion_prior.eval()
+        N = c_embeds.shape[0] if c_embeds is not None else 1
 
-    def generate(self, c_embeds=None, num_inference_steps=50, guidance_scale=5.0,
-                 generator=None, return_intermediates=False):
-        self.eval()
+        # 1. Prepare timesteps
+        from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import retrieve_timesteps
+        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, self.device, timesteps)
 
-        with torch.no_grad():
-            # 确定批次大小
-            batch_size = c_embeds.shape[0] if c_embeds is not None else 1
+        # 2. Prepare c_embeds
+        if c_embeds is not None:
+            c_embeds = c_embeds.to(self.device)
 
-            # 准备时间步
-            from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import retrieve_timesteps
-            timesteps, num_inference_steps = retrieve_timesteps(
-                self.scheduler, num_inference_steps, self.device
-            )
+        # 3. Prepare noise
+        h_t = torch.randn(N, self.diffusion_prior.embed_dim, generator=generator, device=self.device)
 
-            # 准备条件
-            if c_embeds is not None:
-                c_embeds = c_embeds.to(self.device)
-
-            # 从随机噪声开始
-            h_t = torch.randn(batch_size, self.embed_dim, generator=generator, device=self.device)
-
-            intermediates = [] if return_intermediates else None
-
-            # 去噪循环
-            for i, t in enumerate(tqdm(timesteps, desc="Generating")):
-                t_batch = torch.ones(batch_size, dtype=torch.float, device=self.device) * t
-
-                # 噪声预测
-                if guidance_scale == 0 or c_embeds is None:
-                    noise_pred = self.diffusion_prior(h_t, t_batch)
-                else:
-                    noise_pred_cond = self.diffusion_prior(h_t, t_batch, c_embeds)
-                    noise_pred_uncond = self.diffusion_prior(h_t, t_batch)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                # 计算前一个时间步的样本
-                h_t = self.scheduler.step(noise_pred, t.long().item(), h_t, generator=generator).prev_sample
-
-                if return_intermediates:
-                    intermediates.append(h_t.detach().cpu())
-
-            generated_embeds = h_t
-
-            if return_intermediates:
-                return generated_embeds, intermediates
+        # 4. denoising loop
+        for _, t in tqdm(enumerate(timesteps)):
+            t = torch.ones(h_t.shape[0], dtype=torch.float, device=self.device) * t
+            # 4.1 noise prediction
+            if guidance_scale == 0 or c_embeds is None:
+                noise_pred = self.diffusion_prior(h_t, t)
             else:
-                return generated_embeds
+                noise_pred_cond = self.diffusion_prior(h_t, t, c_embeds)
+                noise_pred_uncond = self.diffusion_prior(h_t, t)
+                # perform classifier-free guidance
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+            # 4.2 compute the previous noisy sample h_t -> h_{t-1}
+            h_t = self.scheduler.step(noise_pred, t[0].long().item(), h_t, generator=generator).prev_sample
+
+        return h_t
 
 
 if __name__ == '__main__':

@@ -119,8 +119,8 @@ class PLModel(pl.LightningModule):
         with torch.no_grad():
             img_ref_traing = self.vae.decode_from_latent(img_z.reshape(eeg_z.shape[0], 16, 4, 4), post_process=False)
         self.vae_mse = F.mse_loss(img_recon, img_ref_traing)
-        loss_ssim = 1 - self.ssim_loss(img_recon, img_ref_traing)
-        loss = self.vae_mse + loss_ssim
+        # loss_ssim = 1 - self.ssim_loss(img_recon, img_ref_traing)
+        loss = self.vae_mse
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
@@ -236,6 +236,7 @@ class PLModel(pl.LightningModule):
                 'test_images',
                 grid,
             )
+            print(grid, self.logger.log_dir)
 
         self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
                  batch_size=batch_size)
@@ -373,7 +374,6 @@ def run_experiment(args):
     config['seed'] = seed
     config['timesteps'] = [start_time, end_time]
     config['info'] = f'-ubp-[{start_time},{end_time}]_b1'
-
     result = main(config, yaml)
     return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
 

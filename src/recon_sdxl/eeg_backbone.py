@@ -61,10 +61,11 @@ class Ours(nn.Module):
                                        nn.Linear(proj_dim, proj_dim),
                                        nn.Dropout(drop_proj),
                                    )),
-                                   nn.LayerNorm(proj_dim))
+                                   # nn.LayerNorm(proj_dim)
+                                   )
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
-        self._init_weights()
+        # self._init_weights()
 
     def forward(self, x):
         B, n, c, d = x.shape
