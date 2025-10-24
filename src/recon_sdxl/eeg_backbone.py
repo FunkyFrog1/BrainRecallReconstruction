@@ -45,6 +45,7 @@ class EEGProject(nn.Module):
         x = self.model(x)
         return x
 
+
 class Ours(nn.Module):
     def __init__(self, z_dim, c_num, timesteps, drop_proj=0.7):
         super().__init__()
@@ -55,13 +56,15 @@ class Ours(nn.Module):
         self.input_dim = self.c_num * (self.timesteps[1] - self.timesteps[0])
         proj_dim = z_dim
 
-        self.model = nn.Sequential(nn.Linear(self.input_dim, proj_dim),
+        self.model = nn.Sequential(nn.BatchNorm1d(self.input_dim),
+                                   nn.Linear(self.input_dim, proj_dim),
                                    ResidualAdd(nn.Sequential(
-                                       nn.SiLU(),
+                                       nn.BatchNorm1d(proj_dim),
+                                       nn.GELU(),
                                        nn.Linear(proj_dim, proj_dim),
                                        nn.Dropout(drop_proj),
                                    )),
-                                   # nn.LayerNorm(proj_dim)
+                                   nn.BatchNorm1d(proj_dim),
                                    )
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.softplus = nn.Softplus()
@@ -69,8 +72,8 @@ class Ours(nn.Module):
 
     def forward(self, x):
         B, n, c, d = x.shape
-        x = x.view(B, n, self.input_dim)
-        x = self.model(x).mean(dim=1)
+        x = x.view(B, n, self.input_dim).mean(dim=1)
+        x = self.model(x)
         return x
 
     def _init_weights(self):
