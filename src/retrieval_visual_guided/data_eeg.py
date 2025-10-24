@@ -369,7 +369,7 @@ class EEGDataset(Dataset):
         sample = {
             'idx': index,
             'eeg': eeg[:, :, self.timesteps[0]:self.timesteps[1]],
-            'eeg_v': eeg[:, :, 25:275],
+            'eeg_v': eeg[:, :, 25:250],
             'label': label,
             'img_path': img_path,
             'img': img,

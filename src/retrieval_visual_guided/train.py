@@ -19,6 +19,8 @@ import torch.nn.functional as F
 from data_eeg import load_eeg_data
 from utils import update_config, instantiate_from_config, get_device, ClipLoss, mixco_data, marginal_cosine_similarity_loss
 import time
+import matplotlib.pyplot as plt
+
 device = get_device('auto')
 
 
@@ -74,7 +76,7 @@ class PLModel(pl.LightningModule):
         else:
             img_z = batch['img_features']
 
-        eeg_z, eeg_z_r = self.brain(eeg, eeg_v)
+        eeg_z, eeg_z_v = self.brain(eeg, eeg_v)
 
         logit_scale = self.brain.logit_scale
         logit_scale = F.softplus(logit_scale)
@@ -82,17 +84,15 @@ class PLModel(pl.LightningModule):
         img_z = img_z / img_z.norm(dim=-1, keepdim=True)
         if self.config['data']['single_uncertainty_aware']:
             loss, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z.mean(dim=1), logit_scale)
-        else:
-            if self.current_epoch < self.config['train']['epoch']:
-                loss, _ = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
-                _, logits_per_image = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
-            else:
-                loss_teacher, _ = self.criterion(eeg_z.mean(dim=1).detach(), eeg_z_r.mean(dim=1), logit_scale)
-                loss, _ = self.criterion(eeg_z_r.mean(dim=1), img_z, logit_scale)
-                loss = loss * 1.0 + loss_teacher * 0.1
-                _, logits_per_image = self.criterion(eeg_z_r.mean(dim=1), img_z, logit_scale)
 
-        loss = loss
+        else:
+            eeg_z_v = eeg_z_v.mean(dim=1)
+            # print(eeg_z_v.shape, eeg_z.shape, img_z.shape)
+            loss, logits_per_image = self.criterion(eeg_z_v, img_z, logit_scale)
+            loss_1, _ = self.criterion(eeg_z.mean(dim=1), img_z, logit_scale)
+            loss_2 = (1 - F.cosine_similarity(eeg_z.mean(dim=1), eeg_z_v, dim=1)).mean()
+
+        loss = loss + loss_1 + loss_2
 
         if self.config['data']['single_uncertainty_aware']:
             for trial_n in range(eeg_z.shape[1]):
@@ -116,9 +116,9 @@ class PLModel(pl.LightningModule):
                 self.sim[idx, trial_n] = batch_sim
                 self.match_label[idx, trial_n] = match_label
 
-            return eeg_z_r.mean(dim=1), img_z.mean(dim=1), loss
+            return eeg_z.mean(dim=1), img_z.mean(dim=1), loss
 
-        if self.config['data']['uncertainty_aware']:
+        elif self.config['data']['uncertainty_aware']:
             diagonal_elements = torch.diagonal(logits_per_image).cpu().detach().numpy()
             gamma = self.gamma
 
@@ -138,10 +138,7 @@ class PLModel(pl.LightningModule):
             self.sim[idx] = batch_sim
             self.match_label[idx] = match_label
 
-            if self.current_epoch < self.config['train']['epoch']:
-                return eeg_z.mean(dim=1), img_z, loss
-            else:
-                return eeg_z_r.mean(dim=1), img_z, loss
+            return eeg_z.mean(dim=1), img_z, loss
 
     def training_step(self, batch, batch_idx):
         batch_size = batch['idx'].shape[0]
@@ -217,6 +214,12 @@ class PLModel(pl.LightningModule):
         self.all_true_labels = []
 
     def test_step(self, batch, batch_idx):
+        layer = self.brain.model[0]
+
+        # 可选：记录到 TensorBoard（如果您使用 PyTorch Lightning 的 logger）
+        # if hasattr(self, 'logger') and self.logger is not None:
+        #     self.logger.experiment.add_figure(f"weight_heatmap_batch_{batch_idx}", plt.gcf(), batch_idx)
+
         batch_size = batch['idx'].shape[0]
         eeg_z, img_z, loss = self(batch)
         self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True,
@@ -292,25 +295,25 @@ def main(config, yaml):
 
     checkpoint_callback = ModelCheckpoint(save_last=True)
 
-    # if config['exp_setting'] == 'inter-subject':
-    #     early_stop_callback = EarlyStopping(
-    #         monitor='val_top1_acc',
-    #         min_delta=0.001,
-    #         patience=5,
-    #         verbose=False,
-    #         mode='max'
-    #     )
-    # else:
-    #     early_stop_callback = EarlyStopping(
-    #         monitor='train_loss',
-    #         min_delta=0.001,
-    #         patience=5,
-    #         verbose=False,
-    #         mode='min'
-    #     )
+    if config['exp_setting'] == 'inter-subject':
+        early_stop_callback = EarlyStopping(
+            monitor='val_top1_acc',
+            min_delta=0.001,
+            patience=5,
+            verbose=False,
+            mode='max'
+        )
+    else:
+        early_stop_callback = EarlyStopping(
+            monitor='train_loss',
+            min_delta=0.001,
+            patience=5,
+            verbose=False,
+            mode='min'
+        )
 
     trainer = Trainer(log_every_n_steps=10, #strategy=DDPStrategy(find_unused_parameters=False),
-                      callbacks=[checkpoint_callback], max_epochs=config['train']['epoch'] * 2,
+                      callbacks=[early_stop_callback, checkpoint_callback], max_epochs=config['train']['epoch'],
                       devices=[device], accelerator='cuda', logger=logger)
     print(trainer.logger.log_dir)
 
@@ -342,11 +345,10 @@ def run_experiment(args):
     config['seed'] = seed
     config['alpha'] = alpha
     config['timesteps'] = [start_time, end_time]
-    config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.2'
+    config['info'] = f'-ubp{alpha}-[{start_time},{end_time}]-dropout0.7-heinit-OP-SiLU'
 
     result = main(config, yaml)
     return (eeg_backbone, vision_backbone, seed, sub, "SUCCESS", result)
-
 
 
 def run_experiment_with_retry(params, max_retries=30):
@@ -369,8 +371,9 @@ def run_experiment_with_retry(params, max_retries=30):
     # 所有重试都失败
     return ("", "", "", "", "FAILED", "All retries failed")
 
+
 if __name__ == "__main__":
-    smoke_test = True
+    smoke_test = False
 
     eeg_backbones = ['Ours']
     vision_backbones = [('ViT-B-32', 512)]
@@ -423,5 +426,5 @@ if __name__ == "__main__":
                 # 进度显示
                 if (completed + errors) % 10 == 0:
                     print(f"进度: {completed + errors}/{len(param_combinations)}")
-    #
-    # print(f"实验完成! 成功: {completed}, 失败: {errors}")
+
+        print(f"实验完成! 成功: {completed}, 失败: {errors}")

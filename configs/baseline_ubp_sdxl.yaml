@@ -30,7 +30,7 @@ data:
   test_batch_size: 200
   uncertainty_aware: True
   single_uncertainty_aware: False
-  mixco: True
+  mixco: False
   blur_type:
     target: inpating_data.FoveaBlur
     params:
@@ -44,8 +44,8 @@ data:
   timesteps: ${timesteps}
 
 train:
-  epoch: 40
+  epoch: 50
   optimizer: AdamW
-  lr: 1e-4
+  lr: 3e-4
 
 save_dir: 'exp'

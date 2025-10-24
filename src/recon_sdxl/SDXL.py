@@ -63,6 +63,7 @@ class _SDXL():
             grid = torchvision.utils.make_grid(results.images)
             torchvision.utils.save_image(grid, 'gen.png')
 
+
 class SDXL():
     def __init__(self):
         torch.set_grad_enabled(False)
@@ -70,7 +71,8 @@ class SDXL():
             "../../vision_backbone/SDXL/sdxl-vae-fp16-fix",
             torch_dtype=torch.float16
         )
-        self.pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+        # self.pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+        self.pipe = StableDiffusionXLPipeline.from_pretrained(
             "../../vision_backbone/SDXL/stable-diffusion-xl-base-1.0",
             vae=vae,
             torch_dtype=torch.float16,
@@ -84,7 +86,7 @@ class SDXL():
         )
         self.pipe.set_progress_bar_config(disable=True)
         self.device = self.pipe.device
-
+        self.pipe.enable_model_cpu_offload()
         seeds = range(1)
         self.generators = [torch.Generator(self.device).manual_seed(seed) for seed in seeds]
 
@@ -96,20 +98,23 @@ class SDXL():
         eeg_z = eeg_z.detach()
         image = image.resize((512, 512))
 
-        prompt = (
-            "photograph, natural lighting, realistic, detailed, high resolution, 8k, "
-            "sharp focus, professional photography, natural colors, authentic, "
-            "lifelike, true to life, unedited, raw photo"
-        )
+        # prompt = (
+        #     "photograph, natural lighting, realistic, detailed, high resolution, 8k, "
+        #     "sharp focus, professional photography, natural colors, authentic, "
+        #     "lifelike, true to life, unedited, raw photo"
+        # )
+        #
+        # negative_prompt = (
+        #     "painting, drawing, artwork, illustration, cartoon, anime, "
+        #     "digital art, concept art, stylized, artistic, "
+        #     "low quality, worst quality, bad quality, blurry, pixelated, "
+        #     "deformed, distorted, unrealistic lighting, "
+        #     "low resolution, bad proportions, extra limbs, watermark, text, "
+        #     "saturated, oversaturated, vignette, filter, photoshopped"
+        # )
 
-        negative_prompt = (
-            "painting, drawing, artwork, illustration, cartoon, anime, "
-            "digital art, concept art, stylized, artistic, "
-            "low quality, worst quality, bad quality, blurry, pixelated, "
-            "deformed, distorted, unrealistic lighting, "
-            "low resolution, bad proportions, extra limbs, watermark, text, "
-            "saturated, oversaturated, vignette, filter, photoshopped"
-        )
+        prompt = "best quality, high quality, high resolution, detailed, 8k"
+        negative_prompt = 'low quality, blurry, pixelated, cartoonish, deformed, distorted, unrealistic lighting, low resolution, bad proportions, extra limbs, watermark, text, monochrome, bad anatomy'
 
         batch_size = len(self.generators)
 
@@ -126,19 +131,17 @@ class SDXL():
                 results = self.pipe(
                     prompt=[prompt] * batch_size,
                     negative_prompt=[negative_prompt] * batch_size,
-                    image=image,
+                    # image=image,
                     ip_adapter_image_embeds=[torch.cat([batch_neg_z, batch_z], dim=0).to(torch.float16)],
                     height=512,
                     width=512,
                     generator=self.generators,
-                    do_classifier_free_guidance=True,
-                    guidance_scale=7.5,
-                    # num_inference_steps=20,  # 减少步数以加速（根据质量需求调整）
+                    do_classifier_free_guidance=False,
+                    # strength=1.0,
+                    # ip_adapter_scale=1.0,
+                    # num_inference_steps=50,  # 减少步数以加速（根据质量需求调整）
                     num_images_per_prompt=1,
                     output_type="pt",
-
-                    callback=None,  # 禁用回调
-                    callback_steps=None  # 禁用回调步数
                 )
             # 处理结果张量
             images_tensor = results.images.detach()
